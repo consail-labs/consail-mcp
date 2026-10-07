@@ -1,0 +1,11 @@
+﻿{
+  "columns": [
+    { "name": "order_id", "type": "string" },
+    { "name": "amount", "type": "number" }
+  ],
+  "rows": [
+    { "order_id": "o-1", "amount": 12.5 },
+    { "order_id": "o-2", "amount": 8 }
+  ],
+  "total_rows": 2
+}

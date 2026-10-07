@@ -1,0 +1,20 @@
+﻿{
+  "user": {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "email": "demo@example.com",
+    "name": "Demo User",
+    "role": "member"
+  },
+  "environment": {
+    "id": "00000000-0000-0000-0000-0000000000aa",
+    "name": "Development",
+    "slug": "dev",
+    "env_type": "dev"
+  },
+  "stats": {
+    "catalogs": 1,
+    "datasets": 2,
+    "pipelines": 1,
+    "actions": 3
+  }
+}
