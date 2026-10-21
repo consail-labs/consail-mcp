@@ -4,31 +4,36 @@ Governed [Model Context Protocol](https://modelcontextprotocol.io) server for [C
 
 > **Agents connect to Consail. They never get the database password.**
 
-Phase A ships a **local stdio** server for **Cursor** and **Claude Desktop**. Tools are a fixed allowlist mapped 1:1 to existing Consail HTTP APIs. Auth is your existing `consail_*` API key plus environment binding (`X-Consail-Environment`).
+Phase A ships a **local stdio** server for **Cursor** and **Claude Desktop**. Tools are registered only for capabilities on the API client. Auth is a `consailc_` client secret. The client is bound to one environment in Consail, so this process does not send `X-Consail-Environment`. A user `consail_*` API key is rejected at startup.
 
 Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not implemented in this package yet).
 
-## Phase A tools (read / validate only)
+## Phase A tools
 
-| Tool | Consail API |
-|------|-------------|
-| `status` | `GET /api/v1/auth/me` + env + stats |
-| `env_list` | `GET /api/v1/environments` |
-| `catalog_list` | `GET /api/v1/catalogs` |
-| `dataset_list` | `GET /api/v1/datasets` |
-| `dataset_get` | `GET /api/v1/datasets/{ref}` |
-| `dataset_preview` | `GET /api/v1/datasets/{ref}/preview?rows=` (default **50**, hard cap **5000**) |
-| `action_list` | `GET /api/v1/actions` |
-| `pipeline_get` | `GET /api/v1/pipelines/{ref}` |
-| `pipeline_validate` | `POST /api/v1/pipelines/validate` |
+`status` and `env_list` are registered for any live client. The others are registered only when the startup identity includes the capability. Arguments cannot add a dataset, a pipeline, or an environment.
 
-**Never exposed (Phase A):** raw SQL, `secret_get`, API-key create/delete, deletes, writes, `pipeline_run` / `run_get` (Phase C).
+| Tool | Needs | Consail API |
+|------|-------|-------------|
+| `status` | live client | `GET /api/v1/auth/me` + bound env + stats |
+| `env_list` | live client | `GET /api/v1/environments` (bound environment only) |
+| `catalog_list` | `dataset_read` | `GET /api/v1/catalogs` |
+| `dataset_list` | `dataset_read` | `GET /api/v1/datasets` |
+| `dataset_get` | `dataset_read` | `GET /api/v1/datasets/{id}` |
+| `dataset_preview` | `dataset_read` | `GET /api/v1/datasets/{id}/preview?rows=` (default **50**, hard cap **5000**) |
+| `action_list` | any grant | `GET /api/v1/actions` |
+| `pipeline_get` | `pipeline_read` | `GET /api/v1/pipelines/{id}` |
+| `pipeline_validate` | `pipeline_read` | `POST /api/v1/pipelines/validate` |
+| `ask` | `ask` | `POST /api/v1/ask` with `mode: sql_only` only |
+
+`ask` takes a question and an optional subset of granted dataset ids. It has no SQL argument and no `execute` mode.
+
+**Never exposed:** raw SQL, query explorer, `secret_get`, API-key create/delete, deletes, writes. `pipeline_run` / `run_get` stay Phase C and need the `pipeline_run` grant.
 
 ## Requirements
 
 - Node.js **20+**
 - A Consail instance (local, staging, or prod API)
-- A `consail_*` API key scoped to the environment you intend to use
+- An API client secret (`consailc_`). User `consail_*` keys are rejected.
 
 ## Install / run locally
 
@@ -44,16 +49,14 @@ npm run build
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `CONSAIL_URL` | yes | Consail API base URL (e.g. `http://localhost:8080` or `https://api.consail.dev`) |
-| `CONSAIL_API_KEY` | yes | Bearer key with `consail_` prefix |
-| `CONSAIL_ENVIRONMENT` | for data tools | Environment **slug** bound on every env-scoped call via `X-Consail-Environment` |
+| `CONSAIL_CLIENT_SECRET` | yes | API client secret. Must start with `consailc_` |
 | `CONSAIL_TIMEOUT_MS` | no | Per-request timeout (default `30000`) |
 
 Copy `.env.example` if useful — the MCP host should inject env vars into the server process (do not commit real keys).
 
 ```bash
 export CONSAIL_URL=http://localhost:8080
-export CONSAIL_API_KEY=consail_your_key
-export CONSAIL_ENVIRONMENT=dev
+export CONSAIL_CLIENT_SECRET=consailc_your_secret
 npm start
 ```
 
@@ -71,8 +74,7 @@ Add to Cursor MCP settings (JSON), pointing at the built entrypoint:
       "args": ["/absolute/path/to/consail-mcp/dist/index.js"],
       "env": {
         "CONSAIL_URL": "http://localhost:8080",
-        "CONSAIL_API_KEY": "consail_your_key",
-        "CONSAIL_ENVIRONMENT": "dev"
+        "CONSAIL_CLIENT_SECRET": "consailc_your_secret"
       }
     }
   }
@@ -89,8 +91,7 @@ Or via `npx` after publish:
       "args": ["-y", "@consail-labs/consail-mcp"],
       "env": {
         "CONSAIL_URL": "https://api.consail.dev",
-        "CONSAIL_API_KEY": "consail_your_key",
-        "CONSAIL_ENVIRONMENT": "dev"
+        "CONSAIL_CLIENT_SECRET": "consailc_your_secret"
       }
     }
   }
@@ -112,8 +113,7 @@ Edit Claude Desktop config (`claude_desktop_config.json`):
       "args": ["C:\\\\absolute\\\\path\\\\to\\\\consail-mcp\\\\dist\\\\index.js"],
       "env": {
         "CONSAIL_URL": "http://localhost:8080",
-        "CONSAIL_API_KEY": "consail_your_key",
-        "CONSAIL_ENVIRONMENT": "dev"
+        "CONSAIL_CLIENT_SECRET": "consailc_your_secret"
       }
     }
   }
@@ -124,9 +124,10 @@ Restart Claude Desktop after saving.
 
 ## Security defaults
 
-- **Auth fail-closed** — missing/invalid `consail_*` key: process refuses to start; API 401/403 returns structured errors (no stack dumps).
-- **Tenant / env binding** — data tools always send `X-Consail-Environment` from `CONSAIL_ENVIRONMENT`. Tool arguments cannot override the bound environment.
+- **Auth fail-closed** — missing secret, a `consail_*` user key, or a non-2xx `GET /api/v1/auth/me` exits before tools are served. API 401/403 returns structured errors (no stack dumps).
+- **Grant binding** — the client is pinned to one environment. Tool arguments cannot name another environment, or a dataset or pipeline outside the grant list. The secret is not sent to routes outside the read allowlist plus `POST /api/v1/ask`.
 - **Preview row cap** — default 50, hard max 5000 (enforced in this server before calling Consail).
+- **Ask** — registered only with the `ask` grant. The body is `sql_only`. There is no `execute` mode and no SQL argument.
 - **No secrets in payloads** — tools never call secret APIs; fixtures are grepped in CI (`npm run check:secrets`).
 
 ## Tests (security gate A)
@@ -138,10 +139,10 @@ npm run check:secrets
 
 Gate coverage:
 
-1. Auth fail-closed (config + 401)
+1. Auth fail-closed (`consail_` rejected, `consailc_` accepted, startup probe failure exits)
 2. Preview row cap (default + hard 5000)
 3. Fixtures contain no secret values
-4. Env isolation: key/session for env A cannot preview as env B
+4. A tool call sends the client secret, and routes outside the allowlist are refused before the request
 
 ## Stack
 
@@ -154,9 +155,9 @@ Why TypeScript: official MCP SDK, natural fit for Cursor/Claude Desktop stdio pa
 
 | Phase | Status |
 |-------|--------|
-| **A** stdio read/validate | this package |
-| **B** hosted streamable HTTP at `https://mcp.consail.com` | not in this slice |
-| **C** `pipeline_run` / `run_get` | not in this slice |
+| **A** stdio read tools + `ask` `sql_only` when granted | this package |
+| **B** hosted streamable HTTP at `https://mcp.consail.com` | not implemented |
+| **C** `pipeline_run` / `run_get` (needs the `pipeline_run` grant) | not in this slice |
 
 ## License
 

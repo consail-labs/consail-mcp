@@ -1,15 +1,27 @@
-﻿import type { ConsailConfig } from "./config.js";
+import type { ConsailConfig } from "./config.js";
+import { ConfigError } from "./config.js";
 import { ConsailApiError } from "./errors.js";
 
+export type ClientGrant = {
+  capability: string;
+  resource_id?: string;
+};
+
+export type ClientIdentity = {
+  id: string;
+  environment_id: string;
+  capabilities: string[];
+  grants: ClientGrant[];
+};
+
 export type RequestOptions = {
-  /** When false, omit X-Consail-Environment (tenant-level endpoints). Default: send when env set. */
-  withEnvironment?: boolean;
   signal?: AbortSignal;
 };
 
 /**
- * Thin Consail HTTP API client. Maps 1:1 to existing REST endpoints.
- * Auth: Bearer consail_* + optional X-Consail-Environment.
+ * Thin Consail HTTP API client.
+ * Auth: Bearer consailc_ client secret. The server pins the client's environment,
+ * so this process does not send X-Consail-Environment.
  */
 export class ConsailClient {
   constructor(private readonly cfg: ConsailConfig) {}
@@ -78,17 +90,13 @@ export class ConsailClient {
     body: unknown | undefined,
     opts: RequestOptions
   ): Promise<T> {
+    assertAllowedRoute(method, path);
     const url = this.cfg.baseUrl + (path.startsWith("/") ? path : `/${path}`);
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.cfg.apiKey}`,
+      Authorization: `Bearer ${this.cfg.clientSecret}`,
       Accept: "application/json",
       "User-Agent": "consail-mcp/0.1.0",
     };
-
-    const withEnv = opts.withEnvironment !== false;
-    if (withEnv && this.cfg.environment) {
-      headers["X-Consail-Environment"] = this.cfg.environment;
-    }
 
     let payload: string | undefined;
     if (body !== undefined) {
@@ -135,6 +143,50 @@ export class ConsailClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+/** Startup probe. Non-2xx throws before tools are registered. */
+export async function probeIdentity(cfg: ConsailConfig): Promise<ClientIdentity> {
+  const client = new ConsailClient(cfg);
+  let body: { client?: ClientIdentity };
+  try {
+    body = await client.getJson("/api/v1/auth/me");
+  } catch (err) {
+    const status = err instanceof ConsailApiError ? err.statusCode : 0;
+    throw new ConfigError(
+      `startup probe GET /api/v1/auth/me failed (${status || "network"})`
+    );
+  }
+  if (!body?.client?.id || !Array.isArray(body.client.capabilities)) {
+    throw new ConfigError("startup probe did not return an API client");
+  }
+  if (!Array.isArray(body.client.grants)) {
+    body.client.grants = [];
+  }
+  return body.client;
+}
+
+function assertAllowedRoute(method: string, path: string): void {
+  const pathname = new URL(path, "http://local.invalid").pathname;
+  const get = method === "GET";
+  const allowed =
+    (get && pathname === "/api/v1/auth/me") ||
+    (get && pathname === "/api/v1/environments") ||
+    (get && /^\/api\/v1\/environments\/[^/]+$/.test(pathname)) ||
+    (get && /^\/api\/v1\/environments\/[^/]+\/stats$/.test(pathname)) ||
+    (get && pathname === "/api/v1/datasets") ||
+    (get &&
+      /^\/api\/v1\/datasets\/[^/]+$/.test(pathname) &&
+      pathname !== "/api/v1/datasets/tags") ||
+    (get && /^\/api\/v1\/datasets\/[^/]+\/preview$/.test(pathname)) ||
+    (get && pathname === "/api/v1/catalogs") ||
+    (get && /^\/api\/v1\/pipelines\/[^/]+$/.test(pathname)) ||
+    (method === "POST" && pathname === "/api/v1/pipelines/validate") ||
+    (get && pathname === "/api/v1/actions") ||
+    (method === "POST" && pathname === "/api/v1/ask");
+  if (!allowed) {
+    throw new ConsailApiError(403, `route not allowed for MCP: ${method} ${pathname}`);
   }
 }
 

@@ -1,36 +1,59 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * Consail MCP — stdio entrypoint for Cursor + Claude Desktop.
  *
- * Auth (fail-closed): CONSAIL_URL + CONSAIL_API_KEY (consail_*).
- * Env binding: CONSAIL_ENVIRONMENT (required for data tools).
+ * Auth (fail-closed): CONSAIL_URL + CONSAIL_CLIENT_SECRET (consailc_).
+ * The client is bound to one environment by Core. This process does not send an environment header.
  *
- * Phase A: read/validate tools only. No hosted HTTP (Phase B). No pipeline_run (Phase C).
+ * Phase A: read tools plus ask sql_only when granted. No hosted HTTP (Phase B). No pipeline_run (Phase C).
  */
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
-import { loadConfig, ConfigError } from "./config.js";
+import { probeIdentity, type ClientIdentity } from "./client.js";
+import { loadConfig, ConfigError, type ConsailConfig } from "./config.js";
 import { createConsailMcpServer } from "./server.js";
 
-async function main(): Promise<void> {
-  let cfg;
+export async function runStartup(
+  env: Record<string, string | undefined>,
+  onReady: (prepared: { cfg: ConsailConfig; identity: ClientIdentity }) => Promise<void>
+): Promise<number> {
   try {
-    cfg = loadConfig();
+    const cfg = loadConfig(env);
+    const identity = await probeIdentity(cfg);
+    await onReady({ cfg, identity });
+    return 0;
   } catch (err) {
-    const msg = err instanceof ConfigError ? err.message : "invalid configuration";
+    const msg =
+      err instanceof ConfigError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : "invalid configuration";
     console.error(`consail-mcp: ${msg}`);
-    process.exit(1);
-    return;
+    return 1;
   }
-
-  const server = createConsailMcpServer(cfg);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
 }
 
-main().catch((err) => {
-  console.error(
-    "consail-mcp: fatal:",
-    err instanceof Error ? err.message : "unknown error"
-  );
-  process.exit(1);
-});
+async function main(): Promise<void> {
+  const code = await runStartup(process.env, async ({ cfg, identity }) => {
+    const server = createConsailMcpServer(cfg, identity);
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  });
+  if (code !== 0) {
+    process.exit(code);
+  }
+}
+
+// Importing runStartup from tests must not start stdio or call process.exit.
+const entry = process.argv[1];
+if (entry && import.meta.url === pathToFileURL(path.resolve(entry)).href) {
+  main().catch((err) => {
+    console.error(
+      "consail-mcp: fatal:",
+      err instanceof Error ? err.message : "unknown error"
+    );
+    process.exit(1);
+  });
+}

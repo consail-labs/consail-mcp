@@ -1,4 +1,4 @@
-﻿{
+{
   "columns": [
     { "name": "order_id", "type": "string" },
     { "name": "amount", "type": "number" }
