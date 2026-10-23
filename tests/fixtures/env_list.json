@@ -1,4 +1,4 @@
-﻿[
+[
   { "id": "e1", "name": "Development", "slug": "dev", "env_type": "dev" },
   { "id": "e2", "name": "Staging", "slug": "staging", "env_type": "staging" }
 ]

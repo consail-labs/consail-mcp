@@ -1,4 +1,4 @@
-﻿/** Structured tool error (no stack dumps to the agent). */
+/** Structured tool error (no stack dumps to the agent). */
 export type ToolErrorBody = {
   error: string;
   detail?: string;

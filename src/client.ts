@@ -1,16 +1,34 @@
-﻿import type { ConsailConfig } from "./config.js";
+import type { ConsailConfig } from "./config.js";
+import { ConfigError } from "./config.js";
 import { ConsailApiError } from "./errors.js";
+import { loadFreshSession, type StoredSession } from "./session.js";
+
+export type ClientGrant = {
+  capability: string;
+  resource_id?: string;
+};
+
+export type ClientIdentity = {
+  id: string;
+  environment_id: string;
+  capabilities: string[];
+  grants: ClientGrant[];
+  principal?: "client" | "user";
+};
 
 export type RequestOptions = {
-  /** When false, omit X-Consail-Environment (tenant-level endpoints). Default: send when env set. */
-  withEnvironment?: boolean;
   signal?: AbortSignal;
 };
 
 /**
- * Thin Consail HTTP API client. Maps 1:1 to existing REST endpoints.
- * Auth: Bearer consail_* + optional X-Consail-Environment.
+ * Thin Consail HTTP API client.
+ * Auth: Bearer access token. A client secret is exchanged at /oauth/token and is not
+ * sent on tool calls. The server pins an API client's environment, so this process
+ * does not send X-Consail-Environment.
  */
+// Same wording as the CLI, so the user knows how to recover.
+export const SESSION_ENDED = "CLI session ended. Run consail login.";
+
 export class ConsailClient {
   constructor(private readonly cfg: ConsailConfig) {}
 
@@ -78,17 +96,57 @@ export class ConsailClient {
     body: unknown | undefined,
     opts: RequestOptions
   ): Promise<T> {
+    assertAllowedRoute(method, path);
+    await this.ensureToken(false);
+    return this.send(method, path, body, opts, false);
+  }
+
+  private canRefresh(): boolean {
+    if (this.cfg.principal === "user") return this.cfg.configHome !== "";
+    return Boolean(this.cfg.clientSecret && this.cfg.clientId);
+  }
+
+  // A 403 does not refresh. A 401 re-exchanges or refreshes once.
+  private async ensureToken(force: boolean): Promise<void> {
+    const fresh =
+      Boolean(this.cfg.accessToken) &&
+      this.cfg.expiresAt > 0 &&
+      Date.now() + 60_000 < this.cfg.expiresAt;
+    if (fresh && !force) return;
+    if (this.cfg.principal === "user") {
+      if (!this.cfg.configHome) throw new ConsailApiError(401, SESSION_ENDED);
+      const next = await loadFreshSession(
+        this.cfg.configHome,
+        this.cfg.baseUrl,
+        force || !fresh,
+        (current) => refreshUserSession(this.cfg, current)
+      );
+      if (!next?.access_token) throw new ConsailApiError(401, SESSION_ENDED);
+      this.cfg.accessToken = next.access_token;
+      this.cfg.expiresAt = Date.parse(next.expires_at) || 0;
+      return;
+    }
+    if (!this.cfg.clientSecret || !this.cfg.clientId) {
+      throw new ConsailApiError(401, "not authenticated");
+    }
+    const tok = await exchangeClient(this.cfg);
+    this.cfg.accessToken = tok.accessToken;
+    this.cfg.expiresAt = tok.expiresAt;
+  }
+
+  private async send<T>(
+    method: string,
+    path: string,
+    body: unknown | undefined,
+    opts: RequestOptions,
+    retried: boolean
+  ): Promise<T> {
     const url = this.cfg.baseUrl + (path.startsWith("/") ? path : `/${path}`);
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.cfg.apiKey}`,
+      Authorization: `Bearer ${this.cfg.accessToken}`,
       Accept: "application/json",
       "User-Agent": "consail-mcp/0.1.0",
     };
-
-    const withEnv = opts.withEnvironment !== false;
-    if (withEnv && this.cfg.environment) {
-      headers["X-Consail-Environment"] = this.cfg.environment;
-    }
 
     let payload: string | undefined;
     if (body !== undefined) {
@@ -114,6 +172,11 @@ export class ConsailClient {
         }
       }
 
+      if (res.status === 401 && !retried && this.canRefresh()) {
+        await this.ensureToken(true);
+        return this.send(method, path, body, opts, true);
+      }
+
       if (res.status >= 300) {
         throw new ConsailApiError(
           res.status,
@@ -135,6 +198,141 @@ export class ConsailClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+async function exchangeClient(
+  cfg: ConsailConfig
+): Promise<{ accessToken: string; expiresAt: number }> {
+  let res: Response;
+  try {
+    res = await fetch(`${cfg.baseUrl}/oauth/token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": "consail-mcp/0.1.0",
+      },
+      body: JSON.stringify({
+        grant_type: "client_credentials",
+        client_id: cfg.clientId,
+        client_secret: cfg.clientSecret,
+      }),
+      signal: AbortSignal.timeout(cfg.timeoutMs),
+    });
+  } catch (err) {
+    throw new ConsailApiError(0, err instanceof Error ? err.message : "network error");
+  }
+  if (!res.ok) {
+    throw new ConsailApiError(res.status, `token request failed: ${res.status}`);
+  }
+  const parsed = (await res.json()) as { access_token?: string; expires_in?: number };
+  if (!parsed.access_token) {
+    throw new ConsailApiError(res.status, "token response missing access_token");
+  }
+  const seconds = Number(parsed.expires_in ?? 0);
+  return {
+    accessToken: parsed.access_token,
+    expiresAt: seconds > 0 ? Date.now() + seconds * 1000 : 0,
+  };
+}
+
+async function refreshUserSession(
+  cfg: ConsailConfig,
+  current: StoredSession
+): Promise<StoredSession | "ended"> {
+  let res: Response;
+  try {
+    res = await fetch(`${cfg.baseUrl}/api/v1/auth/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": "consail-mcp/0.1.0",
+      },
+      body: JSON.stringify({ refresh_token: current.refresh_token }),
+      signal: AbortSignal.timeout(cfg.timeoutMs),
+    });
+  } catch (err) {
+    throw new ConsailApiError(0, err instanceof Error ? err.message : "network error");
+  }
+  if (res.status === 401) return "ended";
+  if (!res.ok) {
+    throw new ConsailApiError(res.status, `refresh failed: ${res.status}`);
+  }
+  const parsed = (await res.json()) as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+  };
+  if (!parsed.access_token || !parsed.refresh_token) {
+    throw new ConsailApiError(res.status, "refresh response missing tokens");
+  }
+  const seconds = Number(parsed.expires_in ?? 0);
+  return {
+    access_token: parsed.access_token,
+    refresh_token: parsed.refresh_token,
+    expires_at: new Date(Date.now() + Math.max(seconds, 0) * 1000).toISOString(),
+  };
+}
+
+/** Startup probe. Non-2xx throws before tools are registered. */
+export async function probeIdentity(cfg: ConsailConfig): Promise<ClientIdentity> {
+  const client = new ConsailClient(cfg);
+  const probePath =
+    cfg.principal === "user" ? "/api/v1/auth/me" : "/api/v1/auth/client";
+  let body: { client?: ClientIdentity; user?: { id?: string } };
+  try {
+    body = await client.getJson(probePath);
+  } catch (err) {
+    const status = err instanceof ConsailApiError ? err.statusCode : 0;
+    throw new ConfigError(
+      `startup probe GET ${probePath} failed (${status || "network"})`
+    );
+  }
+  if (cfg.principal === "user") {
+    if (!body?.user?.id) {
+      throw new ConfigError("startup probe did not return a user");
+    }
+    return {
+      id: body.user.id,
+      environment_id: "",
+      capabilities: ["dataset_read", "pipeline_read", "ask"],
+      grants: [],
+      principal: "user",
+    };
+  }
+  if (!body?.client?.id || !Array.isArray(body.client.capabilities)) {
+    throw new ConfigError("startup probe did not return an API client");
+  }
+  if (!Array.isArray(body.client.grants)) {
+    body.client.grants = [];
+  }
+  body.client.principal = "client";
+  return body.client;
+}
+
+function assertAllowedRoute(method: string, path: string): void {
+  const pathname = new URL(path, "http://local.invalid").pathname;
+  const get = method === "GET";
+  const allowed =
+    (get && pathname === "/api/v1/auth/client") ||
+    (get && pathname === "/api/v1/auth/me") ||
+    (get && pathname === "/api/v1/environments") ||
+    (get && /^\/api\/v1\/environments\/[^/]+$/.test(pathname)) ||
+    (get && /^\/api\/v1\/environments\/[^/]+\/stats$/.test(pathname)) ||
+    (get && pathname === "/api/v1/datasets") ||
+    (get &&
+      /^\/api\/v1\/datasets\/[^/]+$/.test(pathname) &&
+      pathname !== "/api/v1/datasets/tags") ||
+    (get && /^\/api\/v1\/datasets\/[^/]+\/preview$/.test(pathname)) ||
+    (get && pathname === "/api/v1/catalogs") ||
+    (get && /^\/api\/v1\/pipelines\/[^/]+$/.test(pathname)) ||
+    (method === "POST" && pathname === "/api/v1/pipelines/validate") ||
+    (get && pathname === "/api/v1/actions") ||
+    (method === "POST" && pathname === "/api/v1/ask");
+  if (!allowed) {
+    throw new ConsailApiError(403, `route not allowed for MCP: ${method} ${pathname}`);
   }
 }
 

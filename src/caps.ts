@@ -1,4 +1,4 @@
-﻿/** MCP preview defaults (plan: default ≤50, hard ≤5000). */
+/** MCP preview defaults (plan: default ≤50, hard ≤5000). */
 export const PREVIEW_DEFAULT_ROWS = 50;
 export const PREVIEW_HARD_CAP = 5000;
 
