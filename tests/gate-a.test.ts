@@ -32,9 +32,16 @@ const readIdentity: ClientIdentity = {
 };
 
 describe("security gate A — config fail-closed", () => {
-  it("rejects missing client secret", () => {
+  it("rejects missing client secret when no CLI session exists", () => {
     expect(() =>
-      loadConfig({ CONSAIL_URL: "http://localhost:9", CONSAIL_CLIENT_SECRET: "" })
+      loadConfig({
+        CONSAIL_URL: "http://localhost:9",
+        CONSAIL_CLIENT_SECRET: "",
+        APPDATA: "",
+        XDG_CONFIG_HOME: "",
+        HOME: "",
+        USERPROFILE: "",
+      })
     ).toThrow(ConfigError);
   });
 
@@ -65,10 +72,22 @@ describe("security gate A — config fail-closed", () => {
   it("accepts a consailc_ secret", () => {
     const cfg = loadConfig({
       CONSAIL_URL: "http://localhost:9/",
+      CONSAIL_CLIENT_ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
       CONSAIL_CLIENT_SECRET: "consailc_test_key",
     });
     expect(cfg.baseUrl).toBe("http://localhost:9");
     expect(cfg.clientSecret).toBe("consailc_test_key");
+    expect(cfg.clientId).toBe("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    expect(cfg.principal).toBe("client");
+  });
+
+  it("rejects a client secret without a client id", () => {
+    expect(() =>
+      loadConfig({
+        CONSAIL_URL: "http://localhost:9",
+        CONSAIL_CLIENT_SECRET: "consailc_test_key",
+      })
+    ).toThrow(/CONSAIL_CLIENT_ID/);
   });
 
   it("startup probe failure exits before tools are served", async () => {
@@ -76,6 +95,7 @@ describe("security gate A — config fail-closed", () => {
     const code = await runStartup(
       {
         CONSAIL_URL: "http://127.0.0.1:9",
+        CONSAIL_CLIENT_ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         CONSAIL_CLIENT_SECRET: "consailc_test_key",
       },
       async () => {
@@ -204,8 +224,8 @@ describe("security gate A — client secret on the wire", () => {
           echo_rows: rows,
         });
       },
-      "GET /api/v1/auth/me": (req, res) => {
-        if (req.headers.authorization !== "Bearer consailc_env_a_key") {
+      "GET /api/v1/auth/client": (req, res) => {
+        if (req.headers.authorization !== "Bearer mcp-access-token") {
           return json(res, 401, { message: "unauthorized" });
         }
         return json(res, 200, { client: readIdentity });
@@ -220,14 +240,36 @@ describe("security gate A — client secret on the wire", () => {
 
     const server = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (req.method === "POST" && url.pathname === "/oauth/token") {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const body = JSON.parse(Buffer.concat(chunks).toString() || "{}") as {
+          client_secret?: string;
+          grant_type?: string;
+        };
+        if (
+          body.grant_type !== "client_credentials" ||
+          body.client_secret !== "consailc_env_a_key"
+        ) {
+          return json(res, 401, { message: "invalid client credentials" });
+        }
+        return json(res, 200, {
+          access_token: "mcp-access-token",
+          token_type: "Bearer",
+          expires_in: 900,
+        });
+      }
       const key = `${req.method} ${url.pathname}`;
       const handler = routes[key];
       if (!handler) {
         return json(res, 404, { message: `no route ${key}` });
       }
       const auth = req.headers.authorization ?? "";
-      if (!auth.startsWith("Bearer consailc_")) {
+      if (auth !== "Bearer mcp-access-token") {
         return json(res, 401, { message: "unauthorized" });
+      }
+      if (auth.includes("consailc_")) {
+        return json(res, 500, { message: "secret was sent as a bearer" });
       }
       await handler(req, res, url);
     });
@@ -262,9 +304,18 @@ describe("security gate A — client secret on the wire", () => {
     });
   });
 
-  it("tool call sends the client secret and does not send an environment header", async () => {
+  it("tool call sends the access token and does not send an environment header", async () => {
     const secret = "consailc_env_a_key";
-    const cfg = { baseUrl, clientSecret: secret, timeoutMs: 3000 };
+    const cfg = {
+      baseUrl,
+      clientSecret: secret,
+      clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      accessToken: "",
+      expiresAt: 0,
+      principal: "client" as const,
+      configHome: "",
+      timeoutMs: 3000,
+    };
     const server = createConsailMcpServer(cfg, readIdentity);
     const tools = (
       server as unknown as {
@@ -274,12 +325,22 @@ describe("security gate A — client secret on the wire", () => {
     const ref = "11111111-1111-1111-1111-111111111111";
     await tools!.dataset_preview.handler({ ref, rows: 50 });
     const last = previewCalls.at(-1);
-    expect(last?.auth).toBe(`Bearer ${secret}`);
+    expect(last?.auth).toBe("Bearer mcp-access-token");
+    expect(last?.auth).not.toContain(secret);
     expect(last?.envHeader).toBeNull();
   });
 
   it("ask sends sql_only and no execute mode", async () => {
-    const cfg = { baseUrl, clientSecret: "consailc_env_a_key", timeoutMs: 3000 };
+    const cfg = {
+      baseUrl,
+      clientSecret: "consailc_env_a_key",
+      clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      accessToken: "",
+      expiresAt: 0,
+      principal: "client" as const,
+      configHome: "",
+      timeoutMs: 3000,
+    };
     const server = createConsailMcpServer(cfg, {
       ...readIdentity,
       capabilities: [...readIdentity.capabilities, "ask"],
@@ -298,7 +359,16 @@ describe("security gate A — client secret on the wire", () => {
   });
 
   it("MCP clamps rows before calling API (hard cap)", async () => {
-    const cfg = { baseUrl, clientSecret: "consailc_env_a_key", timeoutMs: 3000 };
+    const cfg = {
+      baseUrl,
+      clientSecret: "consailc_env_a_key",
+      clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      accessToken: "",
+      expiresAt: 0,
+      principal: "client" as const,
+      configHome: "",
+      timeoutMs: 3000,
+    };
     const server = createConsailMcpServer(cfg, readIdentity);
     const tools = (
       server as unknown as {
@@ -309,6 +379,6 @@ describe("security gate A — client secret on the wire", () => {
     await tools!.dataset_preview.handler({ ref, rows: 99999 });
     const last = previewCalls.at(-1);
     expect(last?.path).toContain("rows=5000");
-    expect(last?.auth).toBe("Bearer consailc_env_a_key");
+    expect(last?.auth).toBe("Bearer mcp-access-token");
   });
 });

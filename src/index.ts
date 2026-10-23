@@ -2,7 +2,8 @@
 /**
  * Consail MCP — stdio entrypoint for Cursor + Claude Desktop.
  *
- * Auth (fail-closed): CONSAIL_URL + CONSAIL_CLIENT_SECRET (consailc_).
+ * Auth (fail-closed): CONSAIL_CLIENT_ID + CONSAIL_CLIENT_SECRET are exchanged for an access token.
+ * With neither secret, a local stdio process uses the CLI credential file under its lock.
  * The client is bound to one environment by Core. This process does not send an environment header.
  *
  * Phase A: read tools plus ask sql_only when granted. No hosted HTTP (Phase B). No pipeline_run (Phase C).

@@ -4,7 +4,7 @@ Governed [Model Context Protocol](https://modelcontextprotocol.io) server for [C
 
 > **Agents connect to Consail. They never get the database password.**
 
-Phase A ships a **local stdio** server for **Cursor** and **Claude Desktop**. Tools are registered only for capabilities on the API client. Auth is a `consailc_` client secret. The client is bound to one environment in Consail, so this process does not send `X-Consail-Environment`. A user `consail_*` API key is rejected at startup.
+Phase A ships a **local stdio** server for **Cursor** and **Claude Desktop**. Tools are registered only for capabilities on the identity. A hosted or CI process sets `CONSAIL_CLIENT_ID` (the client UUID) and `CONSAIL_CLIENT_SECRET` (`consailc_`). Those are exchanged at `POST /oauth/token`. Tool calls send the access token, not the secret. The client is bound to one environment, so this process does not send `X-Consail-Environment`. A user `consail_*` key is rejected at startup. With no secret, local stdio reads the CLI credential file (the same lock `consail login` uses) and sends that user access token.
 
 Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not implemented in this package yet).
 
@@ -14,7 +14,7 @@ Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not impl
 
 | Tool | Needs | Consail API |
 |------|-------|-------------|
-| `status` | live client | `GET /api/v1/auth/me` + bound env + stats |
+| `status` | live identity | client: `GET /api/v1/auth/client`; user: `GET /api/v1/auth/me`. Bound env + stats when the identity has an environment |
 | `env_list` | live client | `GET /api/v1/environments` (bound environment only) |
 | `catalog_list` | `dataset_read` | `GET /api/v1/catalogs` |
 | `dataset_list` | `dataset_read` | `GET /api/v1/datasets` |
@@ -33,7 +33,7 @@ Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not impl
 
 - Node.js **20+**
 - A Consail instance (local, staging, or prod API)
-- An API client secret (`consailc_`). User `consail_*` keys are rejected.
+- An API client id and secret (`consailc_`), or a CLI session from `consail login`. User `consail_*` keys are rejected. The secret is exchanged for an access token and is not sent on tool calls.
 
 ## Install / run locally
 
@@ -49,13 +49,15 @@ npm run build
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `CONSAIL_URL` | yes | Consail API base URL (e.g. `http://localhost:8080` or `https://api.consail.dev`) |
-| `CONSAIL_CLIENT_SECRET` | yes | API client secret. Must start with `consailc_` |
+| `CONSAIL_CLIENT_ID` | with a secret | API client UUID |
+| `CONSAIL_CLIENT_SECRET` | or a CLI session | API client secret. Must start with `consailc_`. Exchanged at `POST /oauth/token`. Not written to the CLI credential file |
 | `CONSAIL_TIMEOUT_MS` | no | Per-request timeout (default `30000`) |
 
 Copy `.env.example` if useful — the MCP host should inject env vars into the server process (do not commit real keys).
 
 ```bash
 export CONSAIL_URL=http://localhost:8080
+export CONSAIL_CLIENT_ID=00000000-0000-0000-0000-000000000000
 export CONSAIL_CLIENT_SECRET=consailc_your_secret
 npm start
 ```
@@ -74,6 +76,7 @@ Add to Cursor MCP settings (JSON), pointing at the built entrypoint:
       "args": ["/absolute/path/to/consail-mcp/dist/index.js"],
       "env": {
         "CONSAIL_URL": "http://localhost:8080",
+        "CONSAIL_CLIENT_ID": "00000000-0000-0000-0000-000000000000",
         "CONSAIL_CLIENT_SECRET": "consailc_your_secret"
       }
     }
@@ -91,6 +94,7 @@ Or via `npx` after publish:
       "args": ["-y", "@consail-labs/consail-mcp"],
       "env": {
         "CONSAIL_URL": "https://api.consail.dev",
+        "CONSAIL_CLIENT_ID": "00000000-0000-0000-0000-000000000000",
         "CONSAIL_CLIENT_SECRET": "consailc_your_secret"
       }
     }
@@ -113,6 +117,7 @@ Edit Claude Desktop config (`claude_desktop_config.json`):
       "args": ["C:\\\\absolute\\\\path\\\\to\\\\consail-mcp\\\\dist\\\\index.js"],
       "env": {
         "CONSAIL_URL": "http://localhost:8080",
+        "CONSAIL_CLIENT_ID": "00000000-0000-0000-0000-000000000000",
         "CONSAIL_CLIENT_SECRET": "consailc_your_secret"
       }
     }
@@ -124,8 +129,8 @@ Restart Claude Desktop after saving.
 
 ## Security defaults
 
-- **Auth fail-closed** — missing secret, a `consail_*` user key, or a non-2xx `GET /api/v1/auth/me` exits before tools are served. API 401/403 returns structured errors (no stack dumps).
-- **Grant binding** — the client is pinned to one environment. Tool arguments cannot name another environment, or a dataset or pipeline outside the grant list. The secret is not sent to routes outside the read allowlist plus `POST /api/v1/ask`.
+- **Auth fail-closed** — a missing secret with no CLI session, a `consail_*` user key, a secret without `CONSAIL_CLIENT_ID`, or a non-2xx startup probe exits before tools are served. The client probe is `GET /api/v1/auth/client`. The user probe is `GET /api/v1/auth/me`. The access token is re-exchanged or refreshed when it is inside 60 seconds of expiry, and once after a 401. A 403 does not refresh. API 401/403 returns structured errors (no stack dumps).
+- **Grant binding** — the client is pinned to one environment. Tool arguments cannot name another environment, or a dataset or pipeline outside the grant list. The access token is not sent to routes outside the read allowlist plus `POST /api/v1/ask`. A user session skips the grant list; the API enforces that user's access.
 - **Preview row cap** — default 50, hard max 5000 (enforced in this server before calling Consail).
 - **Ask** — registered only with the `ask` grant. The body is `sql_only`. There is no `execute` mode and no SQL argument.
 - **No secrets in payloads** — tools never call secret APIs; fixtures are grepped in CI (`npm run check:secrets`).
@@ -139,10 +144,10 @@ npm run check:secrets
 
 Gate coverage:
 
-1. Auth fail-closed (`consail_` rejected, `consailc_` accepted, startup probe failure exits)
+1. Auth fail-closed (`consail_` rejected, `consailc_` accepted with a client id, startup probe failure exits)
 2. Preview row cap (default + hard 5000)
 3. Fixtures contain no secret values
-4. A tool call sends the client secret, and routes outside the allowlist are refused before the request
+4. A tool call sends the access token, and routes outside the allowlist are refused before the request
 
 ## Stack
 

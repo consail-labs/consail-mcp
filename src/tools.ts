@@ -37,7 +37,13 @@ function grantIds(identity: ClientIdentity, capability: string): string[] {
     .map((g) => g.resource_id as string);
 }
 
-function assertGranted(ids: string[], ref: string, label: string): void {
+function assertGranted(
+  identity: ClientIdentity,
+  ids: string[],
+  ref: string,
+  label: string
+): void {
+  if (identity.principal === "user") return;
   if (!ids.includes(ref)) {
     throw new Error(`${label} is not in this client's grants`);
   }
@@ -61,14 +67,20 @@ export function registerTools(
     },
     async () => {
       try {
-        const me = await client.getJson<{ client: ClientIdentity }>("/api/v1/auth/me");
+        const me = await client.getJson<{ client?: ClientIdentity; user?: { id: string } }>(
+          identity.principal === "user" ? "/api/v1/auth/me" : "/api/v1/auth/client"
+        );
         const envs = await client.getJson<EnvItem[]>("/api/v1/environments");
         const list = Array.isArray(envs) ? envs : [];
         const env = list.find((e) => e.id === identity.environment_id) ?? list[0] ?? null;
         const stats = identity.environment_id
           ? await client.getJson<EnvStats>(`/api/v1/environments/${identity.environment_id}/stats`)
           : null;
-        return okJson({ client: me.client, environment: env, stats });
+        return okJson(
+          identity.principal === "user"
+            ? { user: me.user, environment: env, stats }
+            : { client: me.client, environment: env, stats }
+        );
       } catch (err) {
         return errResult(err);
       }
@@ -140,7 +152,7 @@ export function registerTools(
       },
       async ({ ref }) => {
         try {
-          assertGranted(datasets, ref, "dataset");
+          assertGranted(identity, datasets, ref, "dataset");
           const detail = await client.getJson<Record<string, unknown>>(
             `/api/v1/datasets/${encodeURIComponent(ref)}`
           );
@@ -169,7 +181,7 @@ export function registerTools(
       },
       async ({ ref, rows }) => {
         try {
-          assertGranted(datasets, ref, "dataset");
+          assertGranted(identity, datasets, ref, "dataset");
           const effective = clampPreviewRows(rows);
           const preview = await client.getJson<Record<string, unknown>>(
             `/api/v1/datasets/${encodeURIComponent(ref)}/preview?rows=${effective}`
@@ -217,7 +229,7 @@ export function registerTools(
       },
       async ({ ref }) => {
         try {
-          assertGranted(pipelines, ref, "pipeline");
+          assertGranted(identity, pipelines, ref, "pipeline");
           const detail = await client.getJson<Record<string, unknown>>(
             `/api/v1/pipelines/${encodeURIComponent(ref)}`
           );
@@ -270,7 +282,7 @@ export function registerTools(
         try {
           if (dataset_ids) {
             for (const id of dataset_ids) {
-              assertGranted(askDatasets, id, "dataset");
+              assertGranted(identity, askDatasets, id, "dataset");
             }
           }
           const result = await client.postJson<Record<string, unknown>>("/api/v1/ask", {
