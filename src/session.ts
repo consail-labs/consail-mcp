@@ -117,7 +117,7 @@ function release(lock: HeldLock): void {
   closeSync(lock.fd);
 }
 
-export async function withCredentialLock<T>(
+async function withCredentialLock<T>(
   configHome: string,
   fn: () => Promise<T>
 ): Promise<T> {
@@ -194,7 +194,7 @@ export function peekSession(configHome: string, baseUrl: string): StoredSession 
   }
 }
 
-export function needsRefresh(session: StoredSession): boolean {
+function needsRefresh(session: StoredSession): boolean {
   if (!session.access_token) return true;
   const exp = Date.parse(session.expires_at);
   if (Number.isNaN(exp)) return true;
