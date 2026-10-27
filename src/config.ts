@@ -27,7 +27,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const CLIENT_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function configHomeFrom(env: Record<string, string | undefined>): string {
+function configHomeFrom(env: Record<string, string | undefined>): string {
   if (process.platform === "win32") return (env.APPDATA ?? "").trim();
   const xdg = (env.XDG_CONFIG_HOME ?? "").trim();
   if (xdg) return xdg;

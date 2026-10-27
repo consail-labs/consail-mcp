@@ -35,7 +35,3 @@ export function toolErrorText(err: unknown): string {
   }
   return JSON.stringify({ error: "unexpected error" } satisfies ToolErrorBody);
 }
-
-export function isAuthFailure(err: unknown): boolean {
-  return err instanceof ConsailApiError && (err.statusCode === 401 || err.statusCode === 403);
-}
