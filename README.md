@@ -27,7 +27,7 @@ Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not impl
 
 `ask` takes a question and an optional subset of granted dataset ids. It has no SQL argument and no `execute` mode.
 
-**Never exposed:** raw SQL, query explorer, `secret_get`, API-key create/delete, deletes, writes. `pipeline_run` / `run_get` stay Phase C and need the `pipeline_run` grant.
+**Never exposed:** raw SQL, query explorer, `secret_get`, API-client management, deletes, writes. `pipeline_run` / `run_get` stay Phase C and need the `pipeline_run` grant.
 
 ## Requirements
 
