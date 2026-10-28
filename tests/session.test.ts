@@ -134,8 +134,8 @@ describe("CLI session bearer", () => {
       // The rewritten file keeps the CLI's protection: one user ACE, nothing inherited / 0600.
       if (process.platform === "win32") {
         const acl = execFileSync("icacls", [credentialFile(home)], { encoding: "utf8" });
-        expect(acl).not.toContain("(I)");
-        expect(acl.match(/:\(/g)?.length).toBe(1);
+        expect(acl, acl).not.toContain("(I)");
+        expect(acl.match(/:\(/g)?.length, acl).toBe(1);
       } else {
         expect(statSync(credentialFile(home)).mode & 0o777).toBe(0o600);
       }
@@ -190,6 +190,45 @@ describe.runIf(process.platform === "win32")("Windows credential ACL (MC-02/U7)"
       const me = execFileSync("whoami", { encoding: "utf8" }).trim().toLowerCase();
       expect(after.toLowerCase()).toContain(`${me}:(f)`);
       expect(readdirSync(path.dirname(file)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+describe.runIf(process.platform === "win32")("Windows credential ACL, folder without inheritable ACEs", () => {
+  // A folder with no inheritable ACE (as on CI runners) gives new files the token's default DACL as
+  // explicit ACEs (owner, SYSTEM, Administrators). The rewrite must replace them, like the CLI does.
+  it("leaves only the current user's ACE", async () => {
+    const srv = await listen(async (_req, res, url) => {
+      if (url.pathname === "/api/v1/auth/refresh") {
+        return json(res, 200, { access_token: "dd-access", refresh_token: "dd-refresh", expires_in: 900 });
+      }
+      return json(res, 200, { user: { id: "user-1" } });
+    });
+    try {
+      const home = mkdtempSync(path.join(tmpdir(), "mcp-dacl-"));
+      const me = execFileSync("whoami", { encoding: "utf8" }).trim();
+      execFileSync("icacls", [home, "/inheritance:r", "/grant:r", `${me}:F`], { stdio: "ignore" });
+      writeSession(home, srv.baseUrl, {
+        access_token: "stored-access",
+        refresh_token: "dd-old-refresh",
+        expires_at: new Date(Date.now() + 30 * 1000).toISOString(),
+      });
+      const cfg = loadConfig({
+        CONSAIL_URL: srv.baseUrl,
+        CONSAIL_CLIENT_SECRET: "",
+        APPDATA: home,
+        XDG_CONFIG_HOME: home,
+        HOME: home,
+      });
+      await probeIdentity(cfg);
+      const file = credentialFile(home);
+      expect(readFileSync(file, "utf8")).toContain("dd-refresh");
+      const after = execFileSync("icacls", [file], { encoding: "utf8" });
+      expect(after, after).not.toContain("(I)");
+      expect(after.match(/:\(/g)?.length, after).toBe(1);
+      expect(after.toLowerCase(), after).toContain(`${me.toLowerCase()}:(f)`);
     } finally {
       await srv.close();
     }
