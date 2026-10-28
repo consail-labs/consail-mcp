@@ -10,13 +10,14 @@ import {
   ConsailClient,
   type ClientIdentity,
 } from "../src/client.js";
-import { WORKFLOW_YAML_MAX_BYTES } from "../src/caps.js";
+import { CORE_JSON_BODY_MAX_BYTES, WORKFLOW_YAML_MAX_BYTES } from "../src/caps.js";
 import { loadConfig, ConfigError, type ConsailConfig } from "../src/config.js";
 import { runStartup } from "../src/index.js";
 import { credentialFile } from "../src/session.js";
 import { createConsailMcpServer } from "../src/server.js";
 
 type Tool = {
+  inputSchema?: { safeParse: (args: unknown) => { success: boolean } };
   handler: (args: unknown) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
   annotations?: Record<string, boolean>;
 };
@@ -178,6 +179,58 @@ describe("F-MCPa: grant misses are a uniform 404", () => {
       error: "yaml too large",
       status_code: 400,
     });
+    expect(apiCalls.length).toBe(before);
+  });
+
+  // F-MCPh: Core's JSON body limit, minus the {"yaml":""} wrapper.
+  const WRAPPER_BYTES = JSON.stringify({ yaml: "" }).length;
+
+  it("workflow_validate: ASCII YAML over 1 MB passes the schema and gets the handler's 400", async () => {
+    const tools = toolsOf(createConsailMcpServer(clientCfg(srv.baseUrl), identity));
+    const big = "x".repeat(WORKFLOW_YAML_MAX_BYTES + 1);
+    expect(tools.workflow_validate.inputSchema?.safeParse({ yaml: big }).success).toBe(true);
+    const before = apiCalls.length;
+    const out = await tools.workflow_validate.handler({ yaml: big });
+    expect(out.isError).toBe(true);
+    expect(JSON.parse(out.content[0].text)).toMatchObject({
+      error: "yaml too large",
+      status_code: 400,
+    });
+    expect(apiCalls.length).toBe(before);
+  });
+
+  it("workflow_validate sends YAML whose JSON body is exactly at Core's limit", async () => {
+    const tools = toolsOf(createConsailMcpServer(clientCfg(srv.baseUrl), identity));
+    const head = `nodes: [${GRANTED_PL}] # `;
+    const yaml = head + "x".repeat(CORE_JSON_BODY_MAX_BYTES - WRAPPER_BYTES - head.length);
+    expect(Buffer.byteLength(JSON.stringify({ yaml }))).toBe(CORE_JSON_BODY_MAX_BYTES);
+    const before = apiCalls.length;
+    const out = await tools.workflow_validate.handler({ yaml });
+    expect(out.isError).toBeUndefined();
+    expect(apiCalls.length).toBe(before + 1);
+    expect(workflowBodies.at(-1)).toEqual({ yaml });
+  });
+
+  it("workflow_validate refuses YAML under YAMLMaxLen whose JSON body is over Core's limit", async () => {
+    const tools = toolsOf(createConsailMcpServer(clientCfg(srv.baseUrl), identity));
+    const cases = [
+      // One byte over the body limit.
+      "x".repeat(CORE_JSON_BODY_MAX_BYTES - WRAPPER_BYTES + 1),
+      // Each quote encodes as \" (2 bytes): YAML is half the limit, the body is over it.
+      '"'.repeat(WORKFLOW_YAML_MAX_BYTES / 2 + 1),
+      // Control characters encode as \u00XX (6 bytes).
+      "\u0001".repeat(WORKFLOW_YAML_MAX_BYTES / 6 + 1),
+    ];
+    const before = apiCalls.length;
+    for (const yaml of cases) {
+      expect(Buffer.byteLength(yaml)).toBeLessThanOrEqual(WORKFLOW_YAML_MAX_BYTES);
+      const out = await tools.workflow_validate.handler({ yaml });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content[0].text)).toMatchObject({
+        error: "yaml too large",
+        status_code: 400,
+      });
+    }
     expect(apiCalls.length).toBe(before);
   });
 

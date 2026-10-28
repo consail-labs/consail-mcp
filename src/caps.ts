@@ -5,6 +5,9 @@ export const PREVIEW_HARD_CAP = 5000;
 /** Same limit as Core workflow.YAMLMaxLen (1 MB, counted in bytes). */
 export const WORKFLOW_YAML_MAX_BYTES = 1 << 20;
 
+/** Same limit as Core api maxJSONBodySize (decodeJSON): the whole JSON request body, in bytes. */
+export const CORE_JSON_BODY_MAX_BYTES = 1 << 20;
+
 /**
  * Clamp requested preview rows. Returns the effective row count.
  * Invalid / non-positive values fall back to the default.
