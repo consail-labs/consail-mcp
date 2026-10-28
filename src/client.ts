@@ -26,8 +26,13 @@ export type RequestOptions = {
  * sent on tool calls. The server pins an API client's environment, so this process
  * does not send X-Consail-Environment.
  */
-// Same wording as the CLI, so the user knows how to recover.
-export const SESSION_ENDED = "CLI session ended. Run consail login.";
+// Tells the user how to recover. Ends with the CLI's "Run consail login." wording.
+export const SESSION_ENDED = "CLI session expired or revoked. Run consail login.";
+
+// Core's operator allowlist refuses GET /api/v1/auth/client (and the environment routes),
+// so an operator-mode client cannot pass the startup probe. MCP is integration-only.
+export const OPERATOR_UNSUPPORTED =
+  "startup probe GET /api/v1/auth/client was refused (403). consail-mcp supports integration-mode API clients only; operator-mode clients are not supported. Use an integration client with dataset_read, pipeline_read or ask grants.";
 
 export class ConsailClient {
   constructor(private readonly cfg: ConsailConfig) {}
@@ -177,6 +182,11 @@ export class ConsailClient {
         return this.send(method, path, body, opts, true);
       }
 
+      // A CLI session that Core still rejects after a refresh was revoked or expired.
+      if (res.status === 401 && this.cfg.principal === "user") {
+        throw new ConsailApiError(401, SESSION_ENDED);
+      }
+
       if (res.status >= 300) {
         throw new ConsailApiError(
           res.status,
@@ -286,6 +296,12 @@ export async function probeIdentity(cfg: ConsailConfig): Promise<ClientIdentity>
     body = await client.getJson(probePath);
   } catch (err) {
     const status = err instanceof ConsailApiError ? err.statusCode : 0;
+    if (cfg.principal === "user" && status === 401) {
+      throw new ConfigError(SESSION_ENDED);
+    }
+    if (cfg.principal === "client" && status === 403) {
+      throw new ConfigError(OPERATOR_UNSUPPORTED);
+    }
     throw new ConfigError(
       `startup probe GET ${probePath} failed (${status || "network"})`
     );
@@ -297,7 +313,8 @@ export async function probeIdentity(cfg: ConsailConfig): Promise<ClientIdentity>
     return {
       id: body.user.id,
       environment_id: "",
-      capabilities: ["dataset_read", "pipeline_read", "ask"],
+      // Core /api/v1/ask needs an API client, so a user session does not get `ask`.
+      capabilities: ["dataset_read", "pipeline_read"],
       grants: [],
       principal: "user",
     };
@@ -329,6 +346,7 @@ function assertAllowedRoute(method: string, path: string): void {
     (get && pathname === "/api/v1/catalogs") ||
     (get && /^\/api\/v1\/pipelines\/[^/]+$/.test(pathname)) ||
     (method === "POST" && pathname === "/api/v1/pipelines/validate") ||
+    (method === "POST" && pathname === "/api/v1/workflows/validate") ||
     (get && pathname === "/api/v1/actions") ||
     (method === "POST" && pathname === "/api/v1/ask");
   if (!allowed) {

@@ -23,9 +23,16 @@ Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not impl
 | `action_list` | any grant | `GET /api/v1/actions` |
 | `pipeline_get` | `pipeline_read` | `GET /api/v1/pipelines/{id}` |
 | `pipeline_validate` | `pipeline_read` | `POST /api/v1/pipelines/validate` |
-| `ask` | `ask` | `POST /api/v1/ask` with `mode: sql_only` only |
+| `workflow_validate` | `pipeline_read` | `POST /api/v1/workflows/validate` (`yaml`, max 1 MB like Core) |
+| `ask` | `ask` (API client only) | `POST /api/v1/ask` with `mode: sql_only` only |
 
-`ask` takes a question and an optional subset of granted dataset ids. It has no SQL argument and no `execute` mode.
+`ask` takes a question and an optional subset of granted dataset ids. It has no SQL argument and no `execute` mode. Core serves `/api/v1/ask` to API clients only, so a CLI (user) session does not get `ask`.
+
+Every tool is annotated `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false`.
+
+A dataset or pipeline outside the grants, in another tenant, or that does not exist returns the same `404 "<dataset|pipeline> not found"`. Core's `403 dataset is not granted to this client` from `pipeline_validate` is reported as that 404 too, so tool errors do not reveal whether a resource exists.
+
+**API clients must be integration-mode.** Core's operator-mode allowlist refuses `GET /api/v1/auth/client`, `GET /api/v1/environments` and `GET /api/v1/auth/me`, which the startup probe and `status` need. An operator-mode client exits at startup with an "integration-mode API clients only" error.
 
 **Never exposed:** raw SQL, query explorer, `secret_get`, API-client management, deletes, writes. `pipeline_run` / `run_get` stay Phase C and need the `pipeline_run` grant.
 
@@ -129,7 +136,7 @@ Restart Claude Desktop after saving.
 
 ## Security defaults
 
-- **Auth fail-closed** — a missing secret with no CLI session, a `consail_*` user key, a secret without `CONSAIL_CLIENT_ID`, or a non-2xx startup probe exits before tools are served. The client probe is `GET /api/v1/auth/client`. The user probe is `GET /api/v1/auth/me`. The access token is re-exchanged or refreshed when it is inside 60 seconds of expiry, and once after a 401. A 403 does not refresh. API 401/403 returns structured errors (no stack dumps).
+- **Auth fail-closed** — a missing secret with no CLI session, a `consail_*` user key, a secret without `CONSAIL_CLIENT_ID`, or a non-2xx startup probe exits before tools are served. A revoked or expired CLI session reports `CLI session expired or revoked. Run consail login.` The client probe is `GET /api/v1/auth/client`. The user probe is `GET /api/v1/auth/me`. The access token is re-exchanged or refreshed when it is inside 60 seconds of expiry, and once after a 401. A 403 does not refresh. API 401/403 returns structured errors (no stack dumps).
 - **Grant binding** — the client is pinned to one environment. Tool arguments cannot name another environment, or a dataset or pipeline outside the grant list. The access token is not sent to routes outside the read allowlist plus `POST /api/v1/ask`. A user session skips the grant list; the API enforces that user's access.
 - **Preview row cap** — default 50, hard max 5000 (enforced in this server before calling Consail).
 - **Ask** — registered only with the `ask` grant. The body is `sql_only`. There is no `execute` mode and no SQL argument.

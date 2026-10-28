@@ -163,10 +163,62 @@ function tightenWindowsACL(file: string): void {
     if (!sid.startsWith("S-1-")) throw new Error("credential file: cannot resolve the current user SID");
     userSid = sid;
   }
-  execFileSync(path.join(sys32, "icacls.exe"), [file, "/inheritance:r", "/grant:r", `*${userSid}:F`], {
-    stdio: "ignore",
-    windowsHide: true,
-  });
+  setProtectedUserDacl(file, userSid);
+}
+
+let winAcl: {
+  convert: (sddl: string, rev: number, sd: [bigint | null], size: [number]) => number;
+  getDacl: (sd: bigint, present: [number], dacl: [bigint | null], defaulted: [number]) => number;
+  setNamed: (
+    name: string,
+    type: number,
+    info: number,
+    owner: null,
+    group: null,
+    dacl: bigint,
+    sacl: null
+  ) => number;
+  localFree: (mem: bigint) => bigint | null;
+} | null = null;
+
+// Same as the CLI's tightenACL: replace the whole DACL with one protected ACE for the current
+// user (SetNamedSecurityInfoW + PROTECTED_DACL_SECURITY_INFORMATION). `icacls /grant:r` kept any
+// explicit ACEs a new file got from the token's default DACL (e.g. SYSTEM, Administrators).
+function setProtectedUserDacl(file: string, sid: string): void {
+  if (!winAcl) {
+    const adv = koffi.load("advapi32.dll");
+    const k32 = koffi.load("kernel32.dll");
+    winAcl = {
+      convert: adv.func(
+        "int __stdcall ConvertStringSecurityDescriptorToSecurityDescriptorW(str16 sddl, uint32 rev, _Out_ void **sd, _Out_ uint32 *size)"
+      ),
+      getDacl: adv.func(
+        "int __stdcall GetSecurityDescriptorDacl(void *sd, _Out_ int *present, _Out_ void **dacl, _Out_ int *defaulted)"
+      ),
+      setNamed: adv.func(
+        "uint32 __stdcall SetNamedSecurityInfoW(str16 name, int type, uint32 info, void *owner, void *group, void *dacl, void *sacl)"
+      ),
+      localFree: k32.func("void * __stdcall LocalFree(void *mem)"),
+    };
+  }
+  const api = winAcl;
+  const sd: [bigint | null] = [null];
+  // FA = FILE_ALL_ACCESS; "P" = protected, so nothing is inherited.
+  if (!api.convert(`D:P(A;;FA;;;${sid})`, 1, sd, [0]) || !sd[0]) {
+    throw new Error("credential file: cannot build the user-only ACL");
+  }
+  try {
+    const present: [number] = [0];
+    const dacl: [bigint | null] = [null];
+    if (!api.getDacl(sd[0], present, dacl, [0]) || !present[0] || !dacl[0]) {
+      throw new Error("credential file: cannot build the user-only ACL");
+    }
+    // SE_FILE_OBJECT = 1; DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION.
+    const rc = api.setNamed(file, 1, 0x4 | 0x80000000, null, null, dacl[0], null);
+    if (rc !== 0) throw new Error(`credential file: cannot set the user-only ACL (${rc})`);
+  } finally {
+    api.localFree(sd[0]);
+  }
 }
 
 function writeMap(configHome: string, entries: CredentialMap): void {

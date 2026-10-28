@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -74,7 +74,10 @@ describe("CLI session bearer", () => {
       const server = createConsailMcpServer(cfg, identity);
       const tools = (server as unknown as { _registeredTools?: Record<string, unknown> })
         ._registeredTools;
-      expect(tools && "ask" in tools).toBe(true);
+      // Core /api/v1/ask needs an API client, so a user session never gets the tool (F-MCPb).
+      expect(identity.capabilities).not.toContain("ask");
+      expect(tools && "ask" in tools).toBe(false);
+      expect(tools && "dataset_get" in tools).toBe(true);
       for (const name of FORBIDDEN_TOOLS) {
         expect(tools && name in tools).toBe(false);
       }
@@ -131,11 +134,101 @@ describe("CLI session bearer", () => {
       // The rewritten file keeps the CLI's protection: one user ACE, nothing inherited / 0600.
       if (process.platform === "win32") {
         const acl = execFileSync("icacls", [credentialFile(home)], { encoding: "utf8" });
-        expect(acl).not.toContain("(I)");
-        expect(acl.match(/:\(/g)?.length).toBe(1);
+        expect(acl, acl).not.toContain("(I)");
+        expect(acl.match(/:\(/g)?.length, acl).toBe(1);
       } else {
         expect(statSync(credentialFile(home)).mode & 0o777).toBe(0o600);
       }
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+// MC-02 / U7: the config folder hands an inheritable ACE to new files. After a refresh the rewritten
+// credentials.json must still carry only the current user's ACE, with nothing inherited.
+describe.runIf(process.platform === "win32")("Windows credential ACL (MC-02/U7)", () => {
+  it("drops an inheritable Users ACE from the folder when the file is rewritten", async () => {
+    const srv = await listen(async (_req, res, url) => {
+      if (url.pathname === "/api/v1/auth/refresh") {
+        return json(res, 200, {
+          access_token: "u7-access",
+          refresh_token: "u7-refresh",
+          expires_in: 900,
+        });
+      }
+      return json(res, 200, { user: { id: "user-1" } });
+    });
+    try {
+      const home = mkdtempSync(path.join(tmpdir(), "mcp-u7-"));
+      // S-1-5-32-545 is BUILTIN\Users; the SID form does not depend on the Windows locale.
+      execFileSync("icacls", [home, "/grant", "*S-1-5-32-545:(OI)(CI)R"], { stdio: "ignore" });
+      writeSession(home, srv.baseUrl, {
+        access_token: "stored-access",
+        refresh_token: "u7-old-refresh",
+        expires_at: new Date(Date.now() + 30 * 1000).toISOString(),
+      });
+      const file = credentialFile(home);
+      // Precondition: a plain write inherits the folder's ACEs, including Users.
+      const before = execFileSync("icacls", [file], { encoding: "utf8" });
+      expect(before).toContain("(I)");
+      expect(before.match(/:\(/g)?.length ?? 0).toBeGreaterThan(1);
+
+      const cfg = loadConfig({
+        CONSAIL_URL: srv.baseUrl,
+        CONSAIL_CLIENT_SECRET: "",
+        APPDATA: home,
+        XDG_CONFIG_HOME: home,
+        HOME: home,
+      });
+      await probeIdentity(cfg);
+      expect(readFileSync(file, "utf8")).toContain("u7-refresh");
+
+      const after = execFileSync("icacls", [file], { encoding: "utf8" });
+      expect(after).not.toContain("(I)");
+      expect(after.match(/:\(/g)?.length).toBe(1);
+      const me = execFileSync("whoami", { encoding: "utf8" }).trim().toLowerCase();
+      expect(after.toLowerCase()).toContain(`${me}:(f)`);
+      expect(readdirSync(path.dirname(file)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+describe.runIf(process.platform === "win32")("Windows credential ACL, folder without inheritable ACEs", () => {
+  // A folder with no inheritable ACE (as on CI runners) gives new files the token's default DACL as
+  // explicit ACEs (owner, SYSTEM, Administrators). The rewrite must replace them, like the CLI does.
+  it("leaves only the current user's ACE", async () => {
+    const srv = await listen(async (_req, res, url) => {
+      if (url.pathname === "/api/v1/auth/refresh") {
+        return json(res, 200, { access_token: "dd-access", refresh_token: "dd-refresh", expires_in: 900 });
+      }
+      return json(res, 200, { user: { id: "user-1" } });
+    });
+    try {
+      const home = mkdtempSync(path.join(tmpdir(), "mcp-dacl-"));
+      const me = execFileSync("whoami", { encoding: "utf8" }).trim();
+      execFileSync("icacls", [home, "/inheritance:r", "/grant:r", `${me}:F`], { stdio: "ignore" });
+      writeSession(home, srv.baseUrl, {
+        access_token: "stored-access",
+        refresh_token: "dd-old-refresh",
+        expires_at: new Date(Date.now() + 30 * 1000).toISOString(),
+      });
+      const cfg = loadConfig({
+        CONSAIL_URL: srv.baseUrl,
+        CONSAIL_CLIENT_SECRET: "",
+        APPDATA: home,
+        XDG_CONFIG_HOME: home,
+        HOME: home,
+      });
+      await probeIdentity(cfg);
+      const file = credentialFile(home);
+      expect(readFileSync(file, "utf8")).toContain("dd-refresh");
+      const after = execFileSync("icacls", [file], { encoding: "utf8" });
+      expect(after, after).not.toContain("(I)");
+      expect(after.match(/:\(/g)?.length, after).toBe(1);
+      expect(after.toLowerCase(), after).toContain(`${me.toLowerCase()}:(f)`);
     } finally {
       await srv.close();
     }
