@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import type { ClientIdentity, ConsailClient } from "./client.js";
 import {
   clampPreviewRows,
+  CORE_JSON_BODY_MAX_BYTES,
   PREVIEW_DEFAULT_ROWS,
   PREVIEW_HARD_CAP,
   WORKFLOW_YAML_MAX_BYTES,
@@ -306,18 +307,25 @@ export function registerTools(
         description:
           "Validate workflow YAML. Pipeline references outside pipeline_read are reported as not found by Core.",
         inputSchema: z.object({
+          // No schema max: the handler checks the byte limits, so callers get
+          // "yaml too large" instead of the SDK's generic input validation error.
           yaml: z
             .string()
             .min(1)
-            .max(WORKFLOW_YAML_MAX_BYTES)
             .describe(`Workflow definition YAML (max ${WORKFLOW_YAML_MAX_BYTES} bytes)`),
         }),
         annotations: READ_ONLY,
       },
       async ({ yaml }) => {
         try {
-          // Core's limit is in bytes; the schema max counts UTF-16 units.
-          if (Buffer.byteLength(yaml, "utf8") > WORKFLOW_YAML_MAX_BYTES) {
+          // Core limits the YAML (YAMLMaxLen) and the whole JSON body
+          // (maxJSONBodySize), both in bytes. Escaping can push the body over
+          // its limit while the YAML is under its own; Core would then fail with
+          // "unexpected EOF", so refuse here before sending anything.
+          if (
+            Buffer.byteLength(yaml, "utf8") > WORKFLOW_YAML_MAX_BYTES ||
+            Buffer.byteLength(JSON.stringify({ yaml }), "utf8") > CORE_JSON_BODY_MAX_BYTES
+          ) {
             throw new ConsailApiError(400, "yaml too large", "max 1 MB");
           }
           const result = await client.postJson<Record<string, unknown>>(
