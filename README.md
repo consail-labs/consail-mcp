@@ -31,7 +31,7 @@ Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not impl
 
 ## Requirements
 
-- Node.js **20+**
+- Node.js **22.12+**
 - A Consail instance (local, staging, or prod API)
 - An API client id and secret (`consailc_`), or a CLI session from `consail login`. User `consail_*` keys are rejected. The secret is exchanged for an access token and is not sent on tool calls.
 
