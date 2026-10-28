@@ -22,7 +22,7 @@
     "prepublishOnly": "npm run build"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "keywords": [
     "consail",
@@ -37,7 +37,7 @@
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.1",
     "koffi": "^3.3.3",
-    "zod": "^4.6.5"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",
