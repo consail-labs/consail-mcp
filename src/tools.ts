@@ -1,8 +1,13 @@
 import * as z from "zod/v4";
 import type { McpServer } from "@modelcontextprotocol/server";
 import type { ClientIdentity, ConsailClient } from "./client.js";
-import { clampPreviewRows, PREVIEW_DEFAULT_ROWS, PREVIEW_HARD_CAP } from "./caps.js";
-import { toolErrorText } from "./errors.js";
+import {
+  clampPreviewRows,
+  PREVIEW_DEFAULT_ROWS,
+  PREVIEW_HARD_CAP,
+  WORKFLOW_YAML_MAX_BYTES,
+} from "./caps.js";
+import { ConsailApiError, toolErrorText } from "./errors.js";
 
 type EnvItem = {
   id: string;
@@ -20,9 +25,32 @@ function okJson(data: unknown) {
   };
 }
 
+// Every tool is a read: it changes nothing in Consail, and only talks to the configured API.
+const READ_ONLY = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+// Core answers 403 "<resource> is not granted to this client" for ungranted, other-tenant and
+// nonexistent datasets alike. Report it as the same 404 a local grant miss returns, so a client
+// cannot tell "exists but not granted" from "does not exist".
+function hideGrantDenial(err: unknown): unknown {
+  if (err instanceof ConsailApiError && err.statusCode === 403) {
+    const m = /^(dataset|pipeline|workflow) is not granted to this client$/.exec(err.message);
+    if (m) return notFound(m[1]);
+  }
+  return err;
+}
+
+function notFound(label: string): ConsailApiError {
+  return new ConsailApiError(404, `${label} not found`);
+}
+
 function errResult(err: unknown) {
   return {
-    content: [{ type: "text" as const, text: toolErrorText(err) }],
+    content: [{ type: "text" as const, text: toolErrorText(hideGrantDenial(err)) }],
     isError: true as const,
   };
 }
@@ -45,7 +73,8 @@ function assertGranted(
 ): void {
   if (identity.principal === "user") return;
   if (!ids.includes(ref)) {
-    throw new Error(`${label} is not in this client's grants`);
+    // Same 404 for ungranted, other-tenant and nonexistent: no existence oracle.
+    throw notFound(label);
   }
 }
 
@@ -64,6 +93,7 @@ export function registerTools(
       description:
         "Check Consail connectivity for this API client: identity, bound environment, and stats.",
       inputSchema: z.object({}),
+      annotations: READ_ONLY,
     },
     async () => {
       try {
@@ -92,6 +122,7 @@ export function registerTools(
     {
       description: "Return the environment this API client is bound to.",
       inputSchema: z.object({}),
+      annotations: READ_ONLY,
     },
     async () => {
       try {
@@ -110,6 +141,7 @@ export function registerTools(
       {
         description: "List catalogs that own this client's granted datasets.",
         inputSchema: z.object({}),
+        annotations: READ_ONLY,
       },
       async () => {
         try {
@@ -128,6 +160,7 @@ export function registerTools(
         inputSchema: z.object({
           catalog: z.string().optional().describe("Optional catalog alias filter"),
         }),
+        annotations: READ_ONLY,
       },
       async ({ catalog }) => {
         try {
@@ -149,6 +182,7 @@ export function registerTools(
         inputSchema: z.object({
           ref: z.string().min(1).describe("Granted dataset id"),
         }),
+        annotations: READ_ONLY,
       },
       async ({ ref }) => {
         try {
@@ -178,6 +212,7 @@ export function registerTools(
               `Row count (default ${PREVIEW_DEFAULT_ROWS}, hard cap ${PREVIEW_HARD_CAP})`
             ),
         }),
+        annotations: READ_ONLY,
       },
       async ({ ref, rows }) => {
         try {
@@ -205,6 +240,7 @@ export function registerTools(
       {
         description: "List actions in the bound environment. Bundle URIs are not returned to clients.",
         inputSchema: z.object({}),
+        annotations: READ_ONLY,
       },
       async () => {
         try {
@@ -226,6 +262,7 @@ export function registerTools(
         inputSchema: z.object({
           ref: z.string().min(1).describe("Granted pipeline id"),
         }),
+        annotations: READ_ONLY,
       },
       async ({ ref }) => {
         try {
@@ -248,12 +285,44 @@ export function registerTools(
         inputSchema: z.object({
           definition_yaml: z.string().min(1).describe("Pipeline definition YAML"),
         }),
+        annotations: READ_ONLY,
       },
       async ({ definition_yaml }) => {
         try {
           const result = await client.postJson<Record<string, unknown>>(
             "/api/v1/pipelines/validate",
             { definition_yaml }
+          );
+          return okJson(result);
+        } catch (err) {
+          return errResult(err);
+        }
+      }
+    );
+
+    server.registerTool(
+      "workflow_validate",
+      {
+        description:
+          "Validate workflow YAML. Pipeline references outside pipeline_read are reported as not found by Core.",
+        inputSchema: z.object({
+          yaml: z
+            .string()
+            .min(1)
+            .max(WORKFLOW_YAML_MAX_BYTES)
+            .describe(`Workflow definition YAML (max ${WORKFLOW_YAML_MAX_BYTES} bytes)`),
+        }),
+        annotations: READ_ONLY,
+      },
+      async ({ yaml }) => {
+        try {
+          // Core's limit is in bytes; the schema max counts UTF-16 units.
+          if (Buffer.byteLength(yaml, "utf8") > WORKFLOW_YAML_MAX_BYTES) {
+            throw new ConsailApiError(400, "yaml too large", "max 1 MB");
+          }
+          const result = await client.postJson<Record<string, unknown>>(
+            "/api/v1/workflows/validate",
+            { yaml }
           );
           return okJson(result);
         } catch (err) {
@@ -277,6 +346,7 @@ export function registerTools(
             .optional()
             .describe("Optional subset of dataset ids already granted for ask"),
         }),
+        annotations: READ_ONLY,
       },
       async ({ question, dataset_ids }) => {
         try {
@@ -310,6 +380,7 @@ export const PHASE_A_TOOLS = [
   "action_list",
   "pipeline_get",
   "pipeline_validate",
+  "workflow_validate",
 ] as const;
 
 /** Tools that must never exist in this slice. */

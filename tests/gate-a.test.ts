@@ -140,7 +140,7 @@ describe("security gate A — tool allowlist", () => {
     );
     const tools = (server as unknown as { _registeredTools?: Record<string, unknown> })
       ._registeredTools;
-    expect(PHASE_A_TOOLS).toHaveLength(9);
+    expect(PHASE_A_TOOLS).toHaveLength(10);
     for (const name of FORBIDDEN_TOOLS) {
       expect(PHASE_A_TOOLS).not.toContain(name as (typeof PHASE_A_TOOLS)[number]);
     }
