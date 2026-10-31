@@ -262,41 +262,6 @@ export function registerTools(
       }
     );
   }
-
-  if (hasCap(identity, "ask")) {
-    const askDatasets = grantIds(identity, "ask");
-    server.registerTool(
-      "ask",
-      {
-        description:
-          "Ask a question over granted datasets. SQL is not accepted. The server runs sql_only.",
-        inputSchema: z.object({
-          question: z.string().min(1),
-          dataset_ids: z
-            .array(z.string())
-            .optional()
-            .describe("Optional subset of dataset ids already granted for ask"),
-        }),
-      },
-      async ({ question, dataset_ids }) => {
-        try {
-          if (dataset_ids) {
-            for (const id of dataset_ids) {
-              assertGranted(identity, askDatasets, id, "dataset");
-            }
-          }
-          const result = await client.postJson<Record<string, unknown>>("/api/v1/ask", {
-            question,
-            ...(dataset_ids ? { dataset_ids } : {}),
-            mode: "sql_only",
-          });
-          return okJson(result);
-        } catch (err) {
-          return errResult(err);
-        }
-      }
-    );
-  }
 }
 
 /** Read tools shipped when the matching grants are present. */
@@ -314,6 +279,7 @@ export const PHASE_A_TOOLS = [
 
 /** Tools that must never exist in this slice. */
 export const FORBIDDEN_TOOLS = [
+  "ask",
   "secret_get",
   "secret_create",
   "secret_delete",

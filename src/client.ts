@@ -297,7 +297,7 @@ export async function probeIdentity(cfg: ConsailConfig): Promise<ClientIdentity>
     return {
       id: body.user.id,
       environment_id: "",
-      capabilities: ["dataset_read", "pipeline_read", "ask"],
+      capabilities: ["dataset_read", "pipeline_read"],
       grants: [],
       principal: "user",
     };
@@ -329,8 +329,7 @@ function assertAllowedRoute(method: string, path: string): void {
     (get && pathname === "/api/v1/catalogs") ||
     (get && /^\/api\/v1\/pipelines\/[^/]+$/.test(pathname)) ||
     (method === "POST" && pathname === "/api/v1/pipelines/validate") ||
-    (get && pathname === "/api/v1/actions") ||
-    (method === "POST" && pathname === "/api/v1/ask");
+    (get && pathname === "/api/v1/actions");
   if (!allowed) {
     throw new ConsailApiError(403, `route not allowed for MCP: ${method} ${pathname}`);
   }

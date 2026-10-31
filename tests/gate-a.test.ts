@@ -153,27 +153,6 @@ describe("security gate A — tool allowlist", () => {
     }
   });
 
-  it("registers ask only with the ask grant and does not register execute", () => {
-    const server = createConsailMcpServer(
-      {
-        baseUrl: "http://127.0.0.1:9",
-        clientSecret: "consailc_test",
-        timeoutMs: 1000,
-      },
-      {
-        ...readIdentity,
-        capabilities: [...readIdentity.capabilities, "ask"],
-        grants: [
-          ...readIdentity.grants,
-          { capability: "ask", resource_id: "11111111-1111-1111-1111-111111111111" },
-        ],
-      }
-    );
-    const tools = (server as unknown as { _registeredTools?: Record<string, unknown> })
-      ._registeredTools;
-    expect(tools && "ask" in tools).toBe(true);
-    expect(tools && "execute" in tools).toBe(false);
-  });
 });
 
 describe("security gate A — fixtures contain no secrets", () => {
@@ -204,11 +183,9 @@ describe("security gate A — client secret on the wire", () => {
   let baseUrl: string;
   let close: () => Promise<void>;
   let previewCalls: Array<{ auth: string; envHeader: string | null; path: string }> = [];
-  let askBodies: unknown[] = [];
 
   beforeAll(async () => {
     previewCalls = [];
-    askBodies = [];
     const routes: Record<string, RouteHandler> = {
       "GET /api/v1/datasets/11111111-1111-1111-1111-111111111111/preview": (req, res, url) => {
         previewCalls.push({
@@ -229,12 +206,6 @@ describe("security gate A — client secret on the wire", () => {
           return json(res, 401, { message: "unauthorized" });
         }
         return json(res, 200, { client: readIdentity });
-      },
-      "POST /api/v1/ask": async (req, res) => {
-        const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
-        askBodies.push(JSON.parse(Buffer.concat(chunks).toString() || "{}"));
-        return json(res, 200, { sql: "select 1", mode: "sql_only" });
       },
     };
 
@@ -328,34 +299,6 @@ describe("security gate A — client secret on the wire", () => {
     expect(last?.auth).toBe("Bearer mcp-access-token");
     expect(last?.auth).not.toContain(secret);
     expect(last?.envHeader).toBeNull();
-  });
-
-  it("ask sends sql_only and no execute mode", async () => {
-    const cfg = {
-      baseUrl,
-      clientSecret: "consailc_env_a_key",
-      clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-      accessToken: "",
-      expiresAt: 0,
-      principal: "client" as const,
-      configHome: "",
-      timeoutMs: 3000,
-    };
-    const server = createConsailMcpServer(cfg, {
-      ...readIdentity,
-      capabilities: [...readIdentity.capabilities, "ask"],
-      grants: [
-        ...readIdentity.grants,
-        { capability: "ask", resource_id: "11111111-1111-1111-1111-111111111111" },
-      ],
-    });
-    const tools = (
-      server as unknown as {
-        _registeredTools?: Record<string, { handler: (args: unknown) => Promise<unknown> }>;
-      }
-    )._registeredTools;
-    await tools!.ask.handler({ question: "how many rows" });
-    expect(askBodies.at(-1)).toEqual({ question: "how many rows", mode: "sql_only" });
   });
 
   it("MCP clamps rows before calling API (hard cap)", async () => {

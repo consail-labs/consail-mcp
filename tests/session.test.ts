@@ -74,7 +74,8 @@ describe("CLI session bearer", () => {
       const server = createConsailMcpServer(cfg, identity);
       const tools = (server as unknown as { _registeredTools?: Record<string, unknown> })
         ._registeredTools;
-      expect(tools && "ask" in tools).toBe(true);
+      expect(tools && "dataset_preview" in tools).toBe(true);
+      expect(tools && "ask" in tools).toBe(false);
       for (const name of FORBIDDEN_TOOLS) {
         expect(tools && name in tools).toBe(false);
       }

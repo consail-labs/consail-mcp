@@ -23,11 +23,8 @@ Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not impl
 | `action_list` | any grant | `GET /api/v1/actions` |
 | `pipeline_get` | `pipeline_read` | `GET /api/v1/pipelines/{id}` |
 | `pipeline_validate` | `pipeline_read` | `POST /api/v1/pipelines/validate` |
-| `ask` | `ask` | `POST /api/v1/ask` with `mode: sql_only` only |
 
-`ask` takes a question and an optional subset of granted dataset ids. It has no SQL argument and no `execute` mode.
-
-**Never exposed:** raw SQL, query explorer, `secret_get`, API-client management, deletes, writes. `pipeline_run` / `run_get` stay Phase C and need the `pipeline_run` grant.
+**Never exposed:** raw SQL, query explorer, `ask`, `secret_get`, API-client management, deletes, writes. `pipeline_run` / `run_get` stay Phase C and need the `pipeline_run` grant.
 
 ## Requirements
 
@@ -130,9 +127,8 @@ Restart Claude Desktop after saving.
 ## Security defaults
 
 - **Auth fail-closed** — a missing secret with no CLI session, a `consail_*` user key, a secret without `CONSAIL_CLIENT_ID`, or a non-2xx startup probe exits before tools are served. The client probe is `GET /api/v1/auth/client`. The user probe is `GET /api/v1/auth/me`. The access token is re-exchanged or refreshed when it is inside 60 seconds of expiry, and once after a 401. A 403 does not refresh. API 401/403 returns structured errors (no stack dumps).
-- **Grant binding** — the client is pinned to one environment. Tool arguments cannot name another environment, or a dataset or pipeline outside the grant list. The access token is not sent to routes outside the read allowlist plus `POST /api/v1/ask`. A user session skips the grant list; the API enforces that user's access.
+- **Grant binding** — the client is pinned to one environment. Tool arguments cannot name another environment, or a dataset or pipeline outside the grant list. The access token is not sent to routes outside the read allowlist. A user session skips the grant list; the API enforces that user's access.
 - **Preview row cap** — default 50, hard max 5000 (enforced in this server before calling Consail).
-- **Ask** — registered only with the `ask` grant. The body is `sql_only`. There is no `execute` mode and no SQL argument.
 - **No secrets in payloads** — tools never call secret APIs; fixtures are grepped in CI (`npm run check:secrets`).
 
 ## Tests (security gate A)
@@ -160,7 +156,7 @@ Why TypeScript: official MCP SDK, natural fit for Cursor/Claude Desktop stdio pa
 
 | Phase | Status |
 |-------|--------|
-| **A** stdio read tools + `ask` `sql_only` when granted | this package |
+| **A** stdio read tools | this package |
 | **B** hosted streamable HTTP at `https://mcp.consail.com` | not implemented |
 | **C** `pipeline_run` / `run_get` (needs the `pipeline_run` grant) | not in this slice |
 
