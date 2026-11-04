@@ -312,6 +312,15 @@ export async function probeIdentity(cfg: ConsailConfig): Promise<ClientIdentity>
   return body.client;
 }
 
+function assistantToolCall(method: string, pathname: string): boolean {
+  if (method !== "POST") return false;
+  const prefix = "/api/v1/assistant/tools/";
+  const suffix = "/call";
+  if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) return false;
+  const name = pathname.slice(prefix.length, pathname.length - suffix.length);
+  return name === "search" || name === "get_resource" || name === "knowledge";
+}
+
 function assertAllowedRoute(method: string, path: string): void {
   const pathname = new URL(path, "http://local.invalid").pathname;
   const get = method === "GET";
@@ -321,15 +330,8 @@ function assertAllowedRoute(method: string, path: string): void {
     (get && pathname === "/api/v1/environments") ||
     (get && /^\/api\/v1\/environments\/[^/]+$/.test(pathname)) ||
     (get && /^\/api\/v1\/environments\/[^/]+\/stats$/.test(pathname)) ||
-    (get && pathname === "/api/v1/datasets") ||
-    (get &&
-      /^\/api\/v1\/datasets\/[^/]+$/.test(pathname) &&
-      pathname !== "/api/v1/datasets/tags") ||
-    (get && /^\/api\/v1\/datasets\/[^/]+\/preview$/.test(pathname)) ||
-    (get && pathname === "/api/v1/catalogs") ||
-    (get && /^\/api\/v1\/pipelines\/[^/]+$/.test(pathname)) ||
-    (method === "POST" && pathname === "/api/v1/pipelines/validate") ||
-    (get && pathname === "/api/v1/actions");
+    (get && pathname === "/api/v1/assistant/tools") ||
+    assistantToolCall(method, pathname);
   if (!allowed) {
     throw new ConsailApiError(403, `route not allowed for MCP: ${method} ${pathname}`);
   }

@@ -1,7 +1,6 @@
 import * as z from "zod/v4";
 import type { McpServer } from "@modelcontextprotocol/server";
 import type { ClientIdentity, ConsailClient } from "./client.js";
-import { clampPreviewRows, PREVIEW_DEFAULT_ROWS, PREVIEW_HARD_CAP } from "./caps.js";
 import { toolErrorText } from "./errors.js";
 
 type EnvItem = {
@@ -27,31 +26,81 @@ function errResult(err: unknown) {
   };
 }
 
-function hasCap(identity: ClientIdentity, name: string): boolean {
-  return identity.capabilities.includes(name);
+const resourceKinds = [
+  "dataset",
+  "catalog",
+  "pipeline",
+  "workflow",
+  "chart",
+  "dashboard",
+  "run",
+  "workflow_run",
+  "action",
+] as const;
+
+type ToolPayload = {
+  content: { type: "text"; text: string }[];
+  structuredContent?: unknown;
+  isError?: boolean;
+};
+
+function searchBody(input: {
+  query?: string;
+  kinds?: string[] | null;
+  limit?: number;
+  offset?: number | null;
+}) {
+  return {
+    query: input.query ?? "",
+    kinds: input.kinds ?? null,
+    limit: input.limit ?? 20,
+    offset: input.offset ?? null,
+  };
 }
 
-function grantIds(identity: ClientIdentity, capability: string): string[] {
-  return identity.grants
-    .filter((g) => g.capability === capability && g.resource_id)
-    .map((g) => g.resource_id as string);
+function resourceBody(input: {
+  ref?: { kind?: string; id?: string };
+  detail?: string;
+  source?: string;
+}) {
+  return {
+    ref: { kind: input.ref?.kind ?? "", id: input.ref?.id ?? "" },
+    detail: input.detail ?? "metadata",
+    source: input.source ?? "stored",
+  };
 }
 
-function assertGranted(
-  identity: ClientIdentity,
-  ids: string[],
-  ref: string,
-  label: string
-): void {
-  if (identity.principal === "user") return;
-  if (!ids.includes(ref)) {
-    throw new Error(`${label} is not in this client's grants`);
+function knowledgeBody(input: { topic?: string; key?: string | null; query?: string | null }) {
+  return {
+    topic: input.topic ?? "",
+    key: input.key ?? null,
+    query: input.query ?? null,
+  };
+}
+
+async function callAssistantTool(
+  client: ConsailClient,
+  name: "search" | "get_resource" | "knowledge",
+  args: unknown
+): Promise<ToolPayload> {
+  try {
+    const result = await client.postJson<ToolPayload>(
+      `/api/v1/assistant/tools/${name}/call`,
+      args
+    );
+    if (!result || !Array.isArray(result.content)) {
+      return errResult(new Error("tool result missing content"));
+    }
+    return result;
+  } catch (err) {
+    return errResult(err);
   }
 }
 
 /**
- * Register a tool only when the probed identity includes the capability.
- * Arguments cannot name a dataset, pipeline, or environment outside that grant list.
+ * status and env_list stay local connectivity tools.
+ * search, get_resource, and knowledge replace the old resource tools.
+ * Core enforces grants. This server does not keep the old names.
  */
 export function registerTools(
   server: McpServer,
@@ -103,171 +152,65 @@ export function registerTools(
     }
   );
 
-  if (hasCap(identity, "dataset_read")) {
-    const datasets = grantIds(identity, "dataset_read");
-    server.registerTool(
-      "catalog_list",
-      {
-        description: "List catalogs that own this client's granted datasets.",
-        inputSchema: z.object({}),
-      },
-      async () => {
-        try {
-          const items = await client.listAll<Record<string, unknown>>("/api/v1/catalogs");
-          return okJson({ items, total: items.length });
-        } catch (err) {
-          return errResult(err);
-        }
-      }
-    );
+  server.registerTool(
+    "search",
+    {
+      description:
+        "Find resources the caller can already see, newest first. An empty query lists them. kinds null searches every kind. limit is 1 to 20. An API client only sees granted datasets, catalogs that own those datasets, granted pipelines, and actions. Charts, dashboards, workflows, and runs are not returned to an API client.",
+      inputSchema: z.object({
+        query: z.string().default(""),
+        kinds: z.array(z.enum(resourceKinds)).nullable().default(null),
+        limit: z.number().int().min(1).max(20).default(20),
+        offset: z.number().int().nullable().default(null),
+      }),
+    },
+    async (input) => callAssistantTool(client, "search", searchBody(input))
+  );
 
-    server.registerTool(
-      "dataset_list",
-      {
-        description: "List datasets granted to this client. Optionally filter by catalog alias.",
-        inputSchema: z.object({
-          catalog: z.string().optional().describe("Optional catalog alias filter"),
+  server.registerTool(
+    "get_resource",
+    {
+      description:
+        "Fetch one resource. detail full is schema metadata for an API client and does not include row samples. source must be stored. An ungranted ref is not found.",
+      inputSchema: z.object({
+        ref: z.object({
+          kind: z.enum(resourceKinds),
+          id: z.string().min(1),
         }),
-      },
-      async ({ catalog }) => {
-        try {
-          const path = catalog
-            ? `/api/v1/datasets?catalog=${encodeURIComponent(catalog)}`
-            : "/api/v1/datasets";
-          const items = await client.listAll<Record<string, unknown>>(path);
-          return okJson({ items, total: items.length });
-        } catch (err) {
-          return errResult(err);
-        }
-      }
-    );
+        detail: z.enum(["metadata", "full"]).default("metadata"),
+        source: z.enum(["stored", "editor"]).default("stored"),
+      }),
+    },
+    async (input) => callAssistantTool(client, "get_resource", resourceBody(input))
+  );
 
-    server.registerTool(
-      "dataset_get",
-      {
-        description: "Get one granted dataset by id. The id must already be in dataset_read.",
-        inputSchema: z.object({
-          ref: z.string().min(1).describe("Granted dataset id"),
-        }),
-      },
-      async ({ ref }) => {
-        try {
-          assertGranted(identity, datasets, ref, "dataset");
-          const detail = await client.getJson<Record<string, unknown>>(
-            `/api/v1/datasets/${encodeURIComponent(ref)}`
-          );
-          return okJson(detail);
-        } catch (err) {
-          return errResult(err);
-        }
-      }
-    );
-
-    server.registerTool(
-      "dataset_preview",
-      {
-        description: `Preview a granted dataset. Default ${PREVIEW_DEFAULT_ROWS} rows; hard cap ${PREVIEW_HARD_CAP}.`,
-        inputSchema: z.object({
-          ref: z.string().min(1).describe("Granted dataset id"),
-          rows: z
-            .number()
-            .int()
-            .positive()
-            .optional()
-            .describe(
-              `Row count (default ${PREVIEW_DEFAULT_ROWS}, hard cap ${PREVIEW_HARD_CAP})`
-            ),
-        }),
-      },
-      async ({ ref, rows }) => {
-        try {
-          assertGranted(identity, datasets, ref, "dataset");
-          const effective = clampPreviewRows(rows);
-          const preview = await client.getJson<Record<string, unknown>>(
-            `/api/v1/datasets/${encodeURIComponent(ref)}/preview?rows=${effective}`
-          );
-          return okJson({
-            ...preview,
-            rows_requested: rows ?? PREVIEW_DEFAULT_ROWS,
-            rows_effective: effective,
-            rows_hard_cap: PREVIEW_HARD_CAP,
-          });
-        } catch (err) {
-          return errResult(err);
-        }
-      }
-    );
-  }
-
-  if (identity.capabilities.length > 0) {
-    server.registerTool(
-      "action_list",
-      {
-        description: "List actions in the bound environment. Bundle URIs are not returned to clients.",
-        inputSchema: z.object({}),
-      },
-      async () => {
-        try {
-          const items = await client.listAll<Record<string, unknown>>("/api/v1/actions");
-          return okJson({ items, total: items.length });
-        } catch (err) {
-          return errResult(err);
-        }
-      }
-    );
-  }
-
-  if (hasCap(identity, "pipeline_read")) {
-    const pipelines = grantIds(identity, "pipeline_read");
-    server.registerTool(
-      "pipeline_get",
-      {
-        description: "Get one granted pipeline by id.",
-        inputSchema: z.object({
-          ref: z.string().min(1).describe("Granted pipeline id"),
-        }),
-      },
-      async ({ ref }) => {
-        try {
-          assertGranted(identity, pipelines, ref, "pipeline");
-          const detail = await client.getJson<Record<string, unknown>>(
-            `/api/v1/pipelines/${encodeURIComponent(ref)}`
-          );
-          return okJson(detail);
-        } catch (err) {
-          return errResult(err);
-        }
-      }
-    );
-
-    server.registerTool(
-      "pipeline_validate",
-      {
-        description:
-          "Validate pipeline YAML. Dataset references outside dataset_read are rejected by Core.",
-        inputSchema: z.object({
-          definition_yaml: z.string().min(1).describe("Pipeline definition YAML"),
-        }),
-      },
-      async ({ definition_yaml }) => {
-        try {
-          const result = await client.postJson<Record<string, unknown>>(
-            "/api/v1/pipelines/validate",
-            { definition_yaml }
-          );
-          return okJson(result);
-        } catch (err) {
-          return errResult(err);
-        }
-      }
-    );
-  }
+  server.registerTool(
+    "knowledge",
+    {
+      description:
+        "Look up app pages, workflow guides, docs, and formats. This does not read tenant data.",
+      inputSchema: z.object({
+        topic: z.enum(["page", "workflow", "doc", "format"]),
+        key: z.string().nullable().default(null),
+        query: z.string().nullable().default(null),
+      }),
+    },
+    async (input) => callAssistantTool(client, "knowledge", knowledgeBody(input))
+  );
 }
 
-/** Read tools shipped when the matching grants are present. */
+/** Tools registered for every live identity. Core still enforces access. */
 export const PHASE_A_TOOLS = [
   "status",
   "env_list",
+  "search",
+  "get_resource",
+  "knowledge",
+] as const;
+
+/** Tools that must never exist in this slice. */
+export const FORBIDDEN_TOOLS = [
+  "ask",
   "catalog_list",
   "dataset_list",
   "dataset_get",
@@ -275,11 +218,6 @@ export const PHASE_A_TOOLS = [
   "action_list",
   "pipeline_get",
   "pipeline_validate",
-] as const;
-
-/** Tools that must never exist in this slice. */
-export const FORBIDDEN_TOOLS = [
-  "ask",
   "secret_get",
   "secret_create",
   "secret_delete",

@@ -4,27 +4,25 @@ Governed [Model Context Protocol](https://modelcontextprotocol.io) server for [C
 
 > **Agents connect to Consail. They never get the database password.**
 
-Phase A ships a **local stdio** server for **Cursor** and **Claude Desktop**. Tools are registered only for capabilities on the identity. A hosted or CI process sets `CONSAIL_CLIENT_ID` (the client UUID) and `CONSAIL_CLIENT_SECRET` (`consailc_`). Those are exchanged at `POST /oauth/token`. Tool calls send the access token, not the secret. The client is bound to one environment, so this process does not send `X-Consail-Environment`. A user `consail_*` key is rejected at startup. With no secret, local stdio reads the CLI credential file (the same lock `consail login` uses) and sends that user access token.
+Phase A ships a **local stdio** server for **Cursor** and **Claude Desktop**. Resource tools are `search`, `get_resource`, and `knowledge`. Core enforces grants and AI access. A hosted or CI process sets `CONSAIL_CLIENT_ID` (the client UUID) and `CONSAIL_CLIENT_SECRET` (`consailc_`). Those are exchanged at `POST /oauth/token`. Tool calls send the access token, not the secret. The client is bound to one environment, so this process does not send `X-Consail-Environment`. A user `consail_*` key is rejected at startup. With no secret, local stdio reads the CLI credential file (the same lock `consail login` uses) and sends that user access token.
 
 Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not implemented in this package yet).
 
 ## Phase A tools
 
-`status` and `env_list` are registered for any live client. The others are registered only when the startup identity includes the capability. Arguments cannot add a dataset, a pipeline, or an environment.
+`status` and `env_list` check connectivity. `search`, `get_resource`, and `knowledge` are the resource tools. Core allows them for an integration client with `dataset_read`, `pipeline_read`, or `run_read`, and for a signed-in user when the environment AI access is schema or higher. An environment with AI access off returns an empty tool list and refuses the calls.
 
 | Tool | Needs | Consail API |
 |------|-------|-------------|
 | `status` | live identity | client: `GET /api/v1/auth/client`; user: `GET /api/v1/auth/me`. Bound env + stats when the identity has an environment |
 | `env_list` | live client | `GET /api/v1/environments` (bound environment only) |
-| `catalog_list` | `dataset_read` | `GET /api/v1/catalogs` |
-| `dataset_list` | `dataset_read` | `GET /api/v1/datasets` |
-| `dataset_get` | `dataset_read` | `GET /api/v1/datasets/{id}` |
-| `dataset_preview` | `dataset_read` | `GET /api/v1/datasets/{id}/preview?rows=` (default **50**, hard cap **5000**) |
-| `action_list` | any grant | `GET /api/v1/actions` |
-| `pipeline_get` | `pipeline_read` | `GET /api/v1/pipelines/{id}` |
-| `pipeline_validate` | `pipeline_read` | `POST /api/v1/pipelines/validate` |
+| `search` | read grant, or a user session | `POST /api/v1/assistant/tools/search/call` |
+| `get_resource` | read grant, or a user session | `POST /api/v1/assistant/tools/get_resource/call` |
+| `knowledge` | read grant, or a user session | `POST /api/v1/assistant/tools/knowledge/call` |
 
-**Never exposed:** raw SQL, query explorer, `ask`, `secret_get`, API-client management, deletes, writes. `pipeline_run` / `run_get` stay Phase C and need the `pipeline_run` grant.
+An API client sees granted datasets, catalogs that own those datasets, granted pipelines, and actions. Charts, dashboards, workflows, and runs are not returned. `get_resource` is schema metadata and does not include row samples. A signed-in user still sees the kinds their account can open. There is no dataset preview and no pipeline validate tool.
+
+**Never exposed:** the old names (`catalog_list`, `dataset_list`, `dataset_get`, `dataset_preview`, `action_list`, `pipeline_get`, `pipeline_validate`), raw SQL, query explorer, `ask`, `secret_get`, API-client management, deletes, writes. `pipeline_run` / `run_get` stay Phase C and need the `pipeline_run` grant.
 
 ## Requirements
 

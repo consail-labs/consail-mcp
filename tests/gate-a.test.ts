@@ -1,7 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { ConsailClient, type ClientIdentity } from "../src/client.js";
-import { clampPreviewRows, PREVIEW_DEFAULT_ROWS, PREVIEW_HARD_CAP } from "../src/caps.js";
 import { loadConfig, ConfigError } from "../src/config.js";
 import { ConsailApiError } from "../src/errors.js";
 import { FORBIDDEN_TOOLS, PHASE_A_TOOLS } from "../src/tools.js";
@@ -107,27 +106,6 @@ describe("security gate A — config fail-closed", () => {
   });
 });
 
-describe("security gate A — preview row cap", () => {
-  it("defaults to 50", () => {
-    expect(clampPreviewRows(undefined)).toBe(PREVIEW_DEFAULT_ROWS);
-    expect(clampPreviewRows(null)).toBe(PREVIEW_DEFAULT_ROWS);
-    expect(clampPreviewRows(0)).toBe(PREVIEW_DEFAULT_ROWS);
-    expect(clampPreviewRows(-1)).toBe(PREVIEW_DEFAULT_ROWS);
-  });
-
-  it("hard-caps at 5000", () => {
-    expect(clampPreviewRows(5000)).toBe(PREVIEW_HARD_CAP);
-    expect(clampPreviewRows(5001)).toBe(PREVIEW_HARD_CAP);
-    expect(clampPreviewRows(1_000_000)).toBe(PREVIEW_HARD_CAP);
-  });
-
-  it("passes through valid counts under the cap", () => {
-    expect(clampPreviewRows(1)).toBe(1);
-    expect(clampPreviewRows(50)).toBe(50);
-    expect(clampPreviewRows(100)).toBe(100);
-  });
-});
-
 describe("security gate A — tool allowlist", () => {
   it("registers read tools only when the capability is present", () => {
     const server = createConsailMcpServer(
@@ -140,7 +118,7 @@ describe("security gate A — tool allowlist", () => {
     );
     const tools = (server as unknown as { _registeredTools?: Record<string, unknown> })
       ._registeredTools;
-    expect(PHASE_A_TOOLS).toHaveLength(9);
+    expect(PHASE_A_TOOLS).toHaveLength(5);
     for (const name of FORBIDDEN_TOOLS) {
       expect(PHASE_A_TOOLS).not.toContain(name as (typeof PHASE_A_TOOLS)[number]);
     }
@@ -182,23 +160,24 @@ describe("security gate A — fixtures contain no secrets", () => {
 describe("security gate A — client secret on the wire", () => {
   let baseUrl: string;
   let close: () => Promise<void>;
-  let previewCalls: Array<{ auth: string; envHeader: string | null; path: string }> = [];
+  let toolCalls: Array<{ auth: string; envHeader: string | null; path: string; body: string }> = [];
 
   beforeAll(async () => {
-    previewCalls = [];
+    toolCalls = [];
     const routes: Record<string, RouteHandler> = {
-      "GET /api/v1/datasets/11111111-1111-1111-1111-111111111111/preview": (req, res, url) => {
-        previewCalls.push({
+      "POST /api/v1/assistant/tools/search/call": async (req, res, url) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        toolCalls.push({
           auth: req.headers.authorization ?? "",
           envHeader: req.headers["x-consail-environment"]?.toString() ?? null,
-          path: url.pathname + url.search,
+          path: url.pathname,
+          body: Buffer.concat(chunks).toString(),
         });
-        const rows = Number(url.searchParams.get("rows") ?? "50");
         return json(res, 200, {
-          columns: [{ name: "id", type: "int" }],
-          rows: [{ id: 1 }],
-          total_rows: 1,
-          echo_rows: rows,
+          content: [{ type: "text", text: "{\"items\":[]}" }],
+          structuredContent: { items: [], next_offset: null },
+          isError: false,
         });
       },
       "GET /api/v1/auth/client": (req, res) => {
@@ -273,6 +252,15 @@ describe("security gate A — client secret on the wire", () => {
     await expect(client.getJson("/api/v1/datasets/tags")).rejects.toMatchObject({
       statusCode: 403,
     });
+    await expect(
+      client.getJson("/api/v1/datasets/11111111-1111-1111-1111-111111111111/preview")
+    ).rejects.toMatchObject({ statusCode: 403 });
+    await expect(client.postJson("/api/v1/pipelines/validate", { definition_yaml: "id: x" })).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    await expect(client.postJson("/api/v1/assistant/tools/run_query/call", {})).rejects.toMatchObject({
+      statusCode: 403,
+    });
   });
 
   it("tool call sends the access token and does not send an environment header", async () => {
@@ -293,35 +281,17 @@ describe("security gate A — client secret on the wire", () => {
         _registeredTools?: Record<string, { handler: (args: unknown) => Promise<unknown> }>;
       }
     )._registeredTools;
-    const ref = "11111111-1111-1111-1111-111111111111";
-    await tools!.dataset_preview.handler({ ref, rows: 50 });
-    const last = previewCalls.at(-1);
+    await tools!.search.handler({});
+    const last = toolCalls.at(-1);
     expect(last?.auth).toBe("Bearer mcp-access-token");
     expect(last?.auth).not.toContain(secret);
     expect(last?.envHeader).toBeNull();
-  });
-
-  it("MCP clamps rows before calling API (hard cap)", async () => {
-    const cfg = {
-      baseUrl,
-      clientSecret: "consailc_env_a_key",
-      clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-      accessToken: "",
-      expiresAt: 0,
-      principal: "client" as const,
-      configHome: "",
-      timeoutMs: 3000,
-    };
-    const server = createConsailMcpServer(cfg, readIdentity);
-    const tools = (
-      server as unknown as {
-        _registeredTools?: Record<string, { handler: (args: unknown) => Promise<unknown> }>;
-      }
-    )._registeredTools;
-    const ref = "11111111-1111-1111-1111-111111111111";
-    await tools!.dataset_preview.handler({ ref, rows: 99999 });
-    const last = previewCalls.at(-1);
-    expect(last?.path).toContain("rows=5000");
-    expect(last?.auth).toBe("Bearer mcp-access-token");
+    expect(last?.path).toBe("/api/v1/assistant/tools/search/call");
+    expect(JSON.parse(last?.body ?? "{}")).toEqual({
+      query: "",
+      kinds: null,
+      limit: 20,
+      offset: null,
+    });
   });
 });
