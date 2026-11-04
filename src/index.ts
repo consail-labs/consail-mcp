@@ -6,7 +6,7 @@
  * With neither secret, a local stdio process uses the CLI credential file under its lock.
  * The client is bound to one environment by Core. This process does not send an environment header.
  *
- * Phase A: read tools. No hosted HTTP (Phase B). No pipeline_run (Phase C).
+ * Phase A: read tools plus workflow_validate, pipeline_run, and query_check. No hosted HTTP (Phase B).
  */
 import path from "node:path";
 import { pathToFileURL } from "node:url";

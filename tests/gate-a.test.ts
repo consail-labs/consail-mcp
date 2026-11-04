@@ -118,7 +118,7 @@ describe("security gate A — tool allowlist", () => {
     );
     const tools = (server as unknown as { _registeredTools?: Record<string, unknown> })
       ._registeredTools;
-    expect(PHASE_A_TOOLS).toHaveLength(5);
+    expect(PHASE_A_TOOLS).toHaveLength(8);
     for (const name of FORBIDDEN_TOOLS) {
       expect(PHASE_A_TOOLS).not.toContain(name as (typeof PHASE_A_TOOLS)[number]);
     }
@@ -165,6 +165,28 @@ describe("security gate A — client secret on the wire", () => {
   beforeAll(async () => {
     toolCalls = [];
     const routes: Record<string, RouteHandler> = {
+      "POST /api/v1/pipelines/22222222-2222-2222-2222-222222222222/run": async (req, res, url) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        toolCalls.push({
+          auth: req.headers.authorization ?? "",
+          envHeader: req.headers["x-consail-environment"]?.toString() ?? null,
+          path: url.pathname,
+          body: Buffer.concat(chunks).toString(),
+        });
+        return json(res, 202, { run_id: "run-1", status: "PENDING" });
+      },
+      "POST /api/v1/workflows/validate": async (req, res, url) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        toolCalls.push({
+          auth: req.headers.authorization ?? "",
+          envHeader: req.headers["x-consail-environment"]?.toString() ?? null,
+          path: url.pathname,
+          body: Buffer.concat(chunks).toString(),
+        });
+        return json(res, 200, { valid: true, errors: [] });
+      },
       "POST /api/v1/assistant/tools/search/call": async (req, res, url) => {
         const chunks: Buffer[] = [];
         for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -178,6 +200,22 @@ describe("security gate A — client secret on the wire", () => {
           content: [{ type: "text", text: "{\"items\":[]}" }],
           structuredContent: { items: [], next_offset: null },
           isError: false,
+        });
+      },
+      "POST /api/v1/query": async (req, res, url) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        toolCalls.push({
+          auth: req.headers.authorization ?? "",
+          envHeader: req.headers["x-consail-environment"]?.toString() ?? null,
+          path: url.pathname,
+          body: Buffer.concat(chunks).toString(),
+        });
+        return json(res, 200, {
+          columns: [{ name: "n", type: "INTEGER" }],
+          rows: [["secret-cell"]],
+          total_rows: 4,
+          truncated: true,
         });
       },
       "GET /api/v1/auth/client": (req, res) => {
@@ -246,7 +284,10 @@ describe("security gate A — client secret on the wire", () => {
       clientSecret: "consailc_env_a_key",
       timeoutMs: 3000,
     });
-    await expect(client.postJson("/api/v1/query", { sql: "select 1" })).rejects.toMatchObject({
+    await expect(client.getJson("/api/v1/query/history")).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    await expect(client.postJson("/api/v1/ai/sql", { question: "how many orders" })).rejects.toMatchObject({
       statusCode: 403,
     });
     await expect(client.getJson("/api/v1/datasets/tags")).rejects.toMatchObject({
@@ -256,6 +297,12 @@ describe("security gate A — client secret on the wire", () => {
       client.getJson("/api/v1/datasets/11111111-1111-1111-1111-111111111111/preview")
     ).rejects.toMatchObject({ statusCode: 403 });
     await expect(client.postJson("/api/v1/pipelines/validate", { definition_yaml: "id: x" })).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    await expect(client.postJson("/api/v1/pipelines/pipe-1/runs", {})).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    await expect(client.getJson("/api/v1/environments/env-1")).rejects.toMatchObject({
       statusCode: 403,
     });
     await expect(client.postJson("/api/v1/assistant/tools/run_query/call", {})).rejects.toMatchObject({
@@ -293,5 +340,97 @@ describe("security gate A — client secret on the wire", () => {
       limit: 20,
       offset: null,
     });
+  });
+
+  it("workflow_validate posts yaml and does not send the secret", async () => {
+    const secret = "consailc_env_a_key";
+    const cfg = {
+      baseUrl,
+      clientSecret: secret,
+      clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      accessToken: "",
+      expiresAt: 0,
+      principal: "client" as const,
+      configHome: "",
+      timeoutMs: 3000,
+    };
+    const server = createConsailMcpServer(cfg, readIdentity);
+    const tools = (
+      server as unknown as {
+        _registeredTools?: Record<string, { handler: (args: unknown) => Promise<unknown> }>;
+      }
+    )._registeredTools;
+    const yaml = "name: nightly\nnodes: []\n";
+    await tools!["workflow_validate"].handler({ yaml });
+    const call = toolCalls.find((entry) => entry.path === "/api/v1/workflows/validate");
+    expect(call?.auth).toBe("Bearer mcp-access-token");
+    expect(call?.auth).not.toContain(secret);
+    expect(call?.envHeader).toBeNull();
+    expect(JSON.parse(call?.body ?? "{}")).toEqual({ yaml });
+  });
+
+  it("pipeline_run posts the pipeline id and params and does not send the secret", async () => {
+    const secret = "consailc_env_a_key";
+    const cfg = {
+      baseUrl,
+      clientSecret: secret,
+      clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      accessToken: "",
+      expiresAt: 0,
+      principal: "client" as const,
+      configHome: "",
+      timeoutMs: 3000,
+    };
+    const server = createConsailMcpServer(cfg, readIdentity);
+    const tools = (
+      server as unknown as {
+        _registeredTools?: Record<string, { handler: (args: unknown) => Promise<unknown> }>;
+      }
+    )._registeredTools;
+    const id = "22222222-2222-2222-2222-222222222222";
+    await tools!["pipeline_run"].handler({ id, params: { min_amount: 10 } });
+    const call = toolCalls.find((entry) => entry.path === `/api/v1/pipelines/${id}/run`);
+    expect(call?.auth).toBe("Bearer mcp-access-token");
+    expect(call?.auth).not.toContain(secret);
+    expect(call?.envHeader).toBeNull();
+    expect(JSON.parse(call?.body ?? "{}")).toEqual({ params: { min_amount: 10 } });
+  });
+
+  it("query_check posts the sql and dataset ids and does not return cell values", async () => {
+    const secret = "consailc_env_a_key";
+    const cfg = {
+      baseUrl,
+      clientSecret: secret,
+      clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      accessToken: "",
+      expiresAt: 0,
+      principal: "client" as const,
+      configHome: "",
+      timeoutMs: 3000,
+    };
+    const server = createConsailMcpServer(cfg, readIdentity);
+    const tools = (
+      server as unknown as {
+        _registeredTools?: Record<string, { handler: (args: unknown) => Promise<{ content?: { text?: string }[] }> }>;
+      }
+    )._registeredTools;
+    const result = await tools!["query_check"].handler({
+      sql: "select count(*) as n from orders",
+      dataset_ids: ["11111111-1111-1111-1111-111111111111"],
+      params: { min_amount: 10 },
+    });
+    const call = toolCalls.find((entry) => entry.path === "/api/v1/query");
+    expect(call?.auth).toBe("Bearer mcp-access-token");
+    expect(call?.auth).not.toContain(secret);
+    expect(JSON.parse(call?.body ?? "{}")).toEqual({
+      sql: "select count(*) as n from orders",
+      dataset_ids: ["11111111-1111-1111-1111-111111111111"],
+      max_rows: 1,
+      params: { min_amount: 10 },
+    });
+    const text = result.content?.[0]?.text ?? "";
+    expect(text).toContain("\"row_count\": 4");
+    expect(text).toContain("INTEGER");
+    expect(text).not.toContain("secret-cell");
   });
 });

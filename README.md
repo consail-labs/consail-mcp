@@ -4,13 +4,13 @@ Governed [Model Context Protocol](https://modelcontextprotocol.io) server for [C
 
 > **Agents connect to Consail. They never get the database password.**
 
-Phase A ships a **local stdio** server for **Cursor** and **Claude Desktop**. Resource tools are `search`, `get_resource`, and `knowledge`. Core enforces grants and AI access. A hosted or CI process sets `CONSAIL_CLIENT_ID` (the client UUID) and `CONSAIL_CLIENT_SECRET` (`consailc_`). Those are exchanged at `POST /oauth/token`. Tool calls send the access token, not the secret. The client is bound to one environment, so this process does not send `X-Consail-Environment`. A user `consail_*` key is rejected at startup. With no secret, local stdio reads the CLI credential file (the same lock `consail login` uses) and sends that user access token.
+Phase A ships a **local stdio** server for **Cursor** and **Claude Desktop**. Resource tools are `search`, `get_resource`, and `knowledge`. `workflow_validate` posts to the existing validate route and does not save. `pipeline_run` starts a run of a pipeline the caller may run. `query_check` runs one read-only query and returns column names and a row count, not cell values. Core enforces grants and AI access. A hosted or CI process sets `CONSAIL_CLIENT_ID` (the client UUID) and `CONSAIL_CLIENT_SECRET` (`consailc_`). Those are exchanged at `POST /oauth/token`. Tool calls send the access token, not the secret. The client is bound to one environment, so this process does not send `X-Consail-Environment`. A user `consail_*` key is rejected at startup. With no secret, local stdio reads the CLI credential file (the same lock `consail login` uses) and sends that user access token.
 
 Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not implemented in this package yet).
 
 ## Phase A tools
 
-`status` and `env_list` check connectivity. `search`, `get_resource`, and `knowledge` are the resource tools. Core allows them for an integration client with `dataset_read`, `pipeline_read`, or `run_read`, and for a signed-in user when the environment AI access is schema or higher. An environment with AI access off returns an empty tool list and refuses the calls.
+`status` and `env_list` check connectivity. `search`, `get_resource`, and `knowledge` are the resource tools. Core allows them for an integration client with `dataset_read`, `pipeline_read`, or `run_read`, and for a signed-in user when the environment AI access is schema or higher. An environment with AI access off returns an empty assistant tool list and refuses those three calls. `workflow_validate`, `pipeline_run`, and `query_check` still post to Core.
 
 | Tool | Needs | Consail API |
 |------|-------|-------------|
@@ -19,10 +19,13 @@ Public hosted origin will be **`https://mcp.consail.com`** (Phase B — not impl
 | `search` | read grant, or a user session | `POST /api/v1/assistant/tools/search/call` |
 | `get_resource` | read grant, or a user session | `POST /api/v1/assistant/tools/get_resource/call` |
 | `knowledge` | read grant, or a user session | `POST /api/v1/assistant/tools/knowledge/call` |
+| `workflow_validate` | `pipeline_read`, or a user session | `POST /api/v1/workflows/validate` |
+| `pipeline_run` | `pipeline_run` on that pipeline, or a user session | `POST /api/v1/pipelines/{id}/run` |
+| `query_check` | `dataset_read` on every dataset, or a user session | `POST /api/v1/query` |
 
-An API client sees granted datasets, catalogs that own those datasets, granted pipelines, and actions. Charts, dashboards, workflows, and runs are not returned. `get_resource` is schema metadata and does not include row samples. A signed-in user still sees the kinds their account can open. There is no dataset preview and no pipeline validate tool.
+`search` is how a signed-in user discovers pipelines, workflows, charts, dashboards, and runs. That session has no grant list. An API client sees granted datasets, catalogs that own those datasets, granted pipelines, actions, workflows whose pipeline refs are all in `pipeline_read`, charts and dashboards whose datasets are all in `dataset_read`, and runs it started of pipelines it is granted (`run_read` or `pipeline_run`). Workflow runs are not returned. `get_resource` is schema metadata and does not include row samples. A signed-in user still sees the kinds their account can open. There is no dataset preview and no pipeline validate tool. `workflow_validate` checks YAML and does not save it. `pipeline_run` starts a run and returns the run id and status. It does not create or edit the pipeline, and it does not return secrets. `query_check` reports whether a query runs. It does not return cell values and it does not turn a question into SQL.
 
-**Never exposed:** the old names (`catalog_list`, `dataset_list`, `dataset_get`, `dataset_preview`, `action_list`, `pipeline_get`, `pipeline_validate`), raw SQL, query explorer, `ask`, `secret_get`, API-client management, deletes, writes. `pipeline_run` / `run_get` stay Phase C and need the `pipeline_run` grant.
+**Never exposed:** the old names (`catalog_list`, `dataset_list`, `dataset_get`, `dataset_preview`, `action_list`, `pipeline_get`, `pipeline_validate`), `ask`, language-to-SQL, `secret_get`, API-client management, deletes, and resource writes. The name `run_get` is not a tool. Run status is `search` and `get_resource`. Query history and downloads stay closed.
 
 ## Requirements
 

@@ -77,6 +77,9 @@ describe("CLI session bearer", () => {
       expect(tools && "search" in tools).toBe(true);
       expect(tools && "get_resource" in tools).toBe(true);
       expect(tools && "knowledge" in tools).toBe(true);
+      expect(tools && "workflow_validate" in tools).toBe(true);
+      expect(tools && "pipeline_run" in tools).toBe(true);
+      expect(tools && "query_check" in tools).toBe(true);
       expect(tools && "dataset_preview" in tools).toBe(false);
       expect(tools && "ask" in tools).toBe(false);
       for (const name of FORBIDDEN_TOOLS) {

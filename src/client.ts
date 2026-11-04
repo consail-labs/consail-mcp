@@ -48,48 +48,6 @@ export class ConsailClient {
     return this.requestJson<T>("POST", path, body, opts);
   }
 
-  /**
-   * Paginate Consail list endpoints that return { items, total } or raw arrays.
-   * Mirrors consail-cli fetchAll behaviour for common shapes.
-   */
-  async listAll<T>(path: string, opts: RequestOptions = {}): Promise<T[]> {
-    const u = new URL(path, "http://local.invalid");
-    const basePath = u.pathname;
-    const params = u.searchParams;
-
-    const collected: T[] = [];
-    let skip = 0;
-    const top = 100;
-
-    for (;;) {
-      params.set("top", String(top));
-      params.set("skip", String(skip));
-      const qs = params.toString();
-      const pagePath = qs ? `${basePath}?${qs}` : basePath;
-      const data = await this.getJson<unknown>(pagePath, opts);
-
-      if (Array.isArray(data)) {
-        collected.push(...(data as T[]));
-        break;
-      }
-
-      if (data && typeof data === "object" && "items" in data) {
-        const page = data as { items: T[]; total?: number };
-        collected.push(...(page.items ?? []));
-        const total = page.total ?? collected.length;
-        if (collected.length >= total || (page.items?.length ?? 0) < top) {
-          break;
-        }
-        skip += top;
-        continue;
-      }
-
-      break;
-    }
-
-    return collected;
-  }
-
   private async requestJson<T>(
     method: string,
     path: string,
@@ -312,6 +270,10 @@ export async function probeIdentity(cfg: ConsailConfig): Promise<ClientIdentity>
   return body.client;
 }
 
+function pipelineRunCall(method: string, pathname: string): boolean {
+  return method === "POST" && /^\/api\/v1\/pipelines\/[^/]+\/run$/.test(pathname);
+}
+
 function assistantToolCall(method: string, pathname: string): boolean {
   if (method !== "POST") return false;
   const prefix = "/api/v1/assistant/tools/";
@@ -328,9 +290,11 @@ function assertAllowedRoute(method: string, path: string): void {
     (get && pathname === "/api/v1/auth/client") ||
     (get && pathname === "/api/v1/auth/me") ||
     (get && pathname === "/api/v1/environments") ||
-    (get && /^\/api\/v1\/environments\/[^/]+$/.test(pathname)) ||
     (get && /^\/api\/v1\/environments\/[^/]+\/stats$/.test(pathname)) ||
     (get && pathname === "/api/v1/assistant/tools") ||
+    (method === "POST" && pathname === "/api/v1/workflows/validate") ||
+    (method === "POST" && pathname === "/api/v1/query") ||
+    pipelineRunCall(method, pathname) ||
     assistantToolCall(method, pathname);
   if (!allowed) {
     throw new ConsailApiError(403, `route not allowed for MCP: ${method} ${pathname}`);
